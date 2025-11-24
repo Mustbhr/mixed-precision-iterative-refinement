@@ -54,12 +54,9 @@ Modern GPUs (especially with Tensor Cores) are much faster at FP16/TF32 arithmet
 ## Building and Running
 
 ### On MacOS (Development)
-```bash
-# Code editing and development
-# Note: CUDA code won't compile on Mac, but you can edit and prepare
-```
 
-### On IBEX (KAUST HPC)
+
+### On IBEX (Deployment)
 ```bash
 # Load required modules
 module load cuda/11.x
@@ -110,5 +107,5 @@ make
 
 ## Progress Log
 
-- **[Date]** - Project initialization and repository setup
+- [Date] - Project initialization and repository setup
 
