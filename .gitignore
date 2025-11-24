@@ -33,6 +33,10 @@ Makefile
 results/*.png
 results/*.pdf
 
+# Personal guides (not for repo)
+docs/IBEX_GUIDE.md
+docs/GETTING_STARTED.md
+
 # Keep directory structure
 !results/.gitkeep
 !tests/.gitkeep
