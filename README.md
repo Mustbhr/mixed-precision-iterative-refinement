@@ -107,5 +107,5 @@ make
 
 ## Progress Log
 
-- **[date: 24-11-2025]** - Project initialization and repository setup
+- **[24-11-2025]** - Project initialization and repository setup
 
