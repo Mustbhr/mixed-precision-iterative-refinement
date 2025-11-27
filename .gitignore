@@ -36,6 +36,7 @@ results/*.pdf
 # Personal guides (not for repo)
 docs/IBEX_GUIDE.md
 docs/GETTING_STARTED.md
+docs/PHASE1_INSTRUCTIONS.md
 
 # Keep directory structure
 !results/.gitkeep
