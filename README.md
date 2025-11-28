@@ -108,4 +108,5 @@ make
 ## Progress Log
 
 - **[24-11-2025]** - Project initialization and repository setup
+- **[27-11-2025]** - Phase 1 Completed. i.e. FP64 LU factorization (baseline). 
 
