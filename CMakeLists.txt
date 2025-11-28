@@ -3,8 +3,9 @@ project(MixedPrecisionIR CUDA CXX)
 
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CXX_STANDARD 17)
-# Support V100 (7.0), RTX 6000 (7.5), A100 (8.0), and newer
-set(CMAKE_CUDA_ARCHITECTURES 70 75 80 86 89)
+# Support wide range of GPUs: K80 (3.7), P100 (6.0), V100 (7.0), A100 (8.0), RTX 4090 (8.9)
+# Note: Tensor Cores only available on 7.0+ (Volta/Turing/Ampere/Ada/Hopper)
+set(CMAKE_CUDA_ARCHITECTURES 35 37 60 61 70 75 80 86 89)
 
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
