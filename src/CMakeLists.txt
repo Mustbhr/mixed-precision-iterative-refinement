@@ -19,8 +19,6 @@ target_link_libraries(mixed_precision_ir
     CUDA::cudart
 )
 
-# Set CUDA architectures (support V100, A100, etc.)
-set_target_properties(mixed_precision_ir baseline_solver PROPERTIES 
-    CUDA_ARCHITECTURES "70;75;80;86;89"
-)
+# CUDA architectures are set in root CMakeLists.txt
+# Inherits: 35,37,60,61,70,75,80,86,89
 
