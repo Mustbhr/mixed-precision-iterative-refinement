@@ -315,7 +315,6 @@ int main(int argc, char** argv) {
     std::cout << "========================================" << std::endl;
     std::cout << "Mixed-Precision Iterative Refinement" << std::endl;
     std::cout << "Phase 1: FP64 Baseline Solver" << std::endl;
-    std::cout << "CS380 GPU Programming Project" << std::endl;
     std::cout << "========================================\n" << std::endl;
     
     // Print device info
