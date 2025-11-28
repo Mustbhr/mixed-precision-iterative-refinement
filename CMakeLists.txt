@@ -3,7 +3,8 @@ project(MixedPrecisionIR CUDA CXX)
 
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CUDA_ARCHITECTURES 80 86 89)  # Ampere, Ada Lovelace architectures
+# Support V100 (7.0), RTX 6000 (7.5), A100 (8.0), and newer
+set(CMAKE_CUDA_ARCHITECTURES 70 75 80 86 89)
 
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
