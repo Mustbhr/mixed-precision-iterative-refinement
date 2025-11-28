@@ -108,7 +108,9 @@ int solve_lu_fp64(
     if (time_ms) {
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
-        cudaEventElapsedTime(time_ms, start, stop);
+        float time_ms_float;
+        cudaEventElapsedTime(&time_ms_float, start, stop);
+        *time_ms = static_cast<double>(time_ms_float);
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
     }
