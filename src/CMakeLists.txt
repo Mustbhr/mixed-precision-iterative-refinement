@@ -1,9 +1,17 @@
 # Matrix utilities (CPU code)
 add_library(matrix_utils utils/matrix_utils.cpp)
 
-# Baseline solver (CUDA code)
+# Baseline solver - Pure FP64 (CUDA code)
 add_library(baseline_solver solvers/baseline_solver.cu)
 target_link_libraries(baseline_solver 
+    CUDA::cublas
+    CUDA::cusolver
+    CUDA::cudart
+)
+
+# Mixed-precision solver - FP32 factorization + FP64 refinement (CUDA code)
+add_library(mixed_precision_solver solvers/mixed_precision_solver.cu)
+target_link_libraries(mixed_precision_solver 
     CUDA::cublas
     CUDA::cusolver
     CUDA::cudart
@@ -14,6 +22,7 @@ add_executable(mixed_precision_ir main.cu)
 target_link_libraries(mixed_precision_ir
     matrix_utils
     baseline_solver
+    mixed_precision_solver
     CUDA::cublas
     CUDA::cusolver
     CUDA::cudart
