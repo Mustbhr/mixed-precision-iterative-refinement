@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=phase2_ir
-#SBATCH --time=00:30:00
+#SBATCH --time=01:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:a100:1
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --partition=batch
 #SBATCH --output=results/phase2_output_%j.txt
 #SBATCH --error=results/phase2_error_%j.txt

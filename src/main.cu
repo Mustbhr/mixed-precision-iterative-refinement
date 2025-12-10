@@ -176,7 +176,7 @@ void benchmark_comparison() {
             << std::setw(12) << "IR Err" << std::endl;
   std::cout << std::string(72, '-') << std::endl;
 
-  int sizes[] = {64, 128, 256, 512, 1024};
+  int sizes[] = {64, 128, 256, 512, 1024, 2048, 4096, 8192};
 
   for (int n : sizes) {
     double *A = new double[n * n];
@@ -364,9 +364,5 @@ int main(int argc, char **argv) {
   std::cout << "- FP32 factorization with FP64 iterative refinement"
             << std::endl;
   std::cout << "- Achieves FP64-level accuracy (~1e-12 tolerance)" << std::endl;
-  std::cout << "- Typically converges in 2-3 iterations" << std::endl;
-  std::cout << "\nNext: Phase 3 - Tensor Core optimization with FP16/TF32"
-            << std::endl;
-
   return 0;
 }
