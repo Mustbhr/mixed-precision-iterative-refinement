@@ -28,6 +28,14 @@ target_link_libraries(mixed_precision_ir
     CUDA::cudart
 )
 
+# Precision Benchmark
+add_executable(precision_benchmark precision_benchmark.cu)
+target_link_libraries(precision_benchmark
+    CUDA::cublas
+    CUDA::cusolver
+    CUDA::cudart
+)
+
 # CUDA architectures are set in root CMakeLists.txt
 # Inherits: 35,37,60,61,70,75,80,86,89
 

@@ -21,8 +21,8 @@ echo ""
 
 # Load required modules
 module purge
-module load cuda/11.8
-module load cmake/3.20
+module load cuda
+module load cmake
 
 # Print module info
 echo "Loaded modules:"
