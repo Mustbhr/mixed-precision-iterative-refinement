@@ -158,59 +158,32 @@ void test_mixed_precision_ir(int n, unsigned int seed = 42) {
 }
 
 // ============================================================================
-// COMPARATIVE BENCHMARK: FP64 vs Mixed-Precision IR vs Tensor Core IR
+// COMPARATIVE BENCHMARK: FP64 vs Mixed-Precision IR
 // ============================================================================
 void benchmark_comparison() {
   std::cout << "\n==========================================================="
             << std::endl;
-  std::cout << "BENCHMARK: FP64 vs Mixed-Prec(FP32-IR) vs Tensor Core(FP16-IR)"
-            << std::endl;
+  std::cout << "BENCHMARK: FP64 vs Mixed-Precision IR" << std::endl;
   std::cout << "==========================================================="
             << std::endl;
 
   std::cout << "\n"
-            << std::setw(6) << "Size" << std::setw(10) << "FP64(ms)"
-            << std::setw(10) << "FP32(ms)" << std::setw(10) << "FP16(ms)"
-            << std::setw(8) << "Spd(F32)" << std::setw(8) << "Spd(F16)"
-            << std::setw(12) << "FP16 Err" << std::endl;
-  std::cout << std::string(80, '-') << std::endl;
+            << std::setw(6) << "Size" << std::setw(12) << "FP64(ms)"
+            << std::setw(12) << "IR(ms)" << std::setw(10) << "Speedup"
+            << std::setw(8) << "Iters" << std::setw(12) << "FP64 Err"
+            << std::setw(12) << "IR Err" << std::endl;
+  std::cout << std::string(84, '-') << std::endl;
 
   int sizes[] = {1024, 2048, 4096, 8192, 10000, 12000, 16000, 20000, 24000};
 
   for (int n : sizes) {
     double *A = new double[n * n];
     double *b = new double[n];
-    double *x_ref = new double[n];
-    double *x_fp32 = new double[n];
-    double *x_fp16 = new double[n];
+    double *x_fp64 = new double[n];
+    double *x_ir = new double[n];
     double *x_true = new double[n];
 
-    // Generate Diagonally Dominant Matrix that fits in FP16
-    // 1. Generate random values in [-1, 1]
     generate_random_matrix_host(A, n, 42);
-
-    // 2. Make it strictly diagonally dominant
-    for (int i = 0; i < n; i++) {
-      double row_sum = 0.0;
-      for (int j = 0; j < n; j++) {
-        if (i != j)
-          row_sum += std::abs(A[i * n + j]);
-      }
-      // Diagonal > Sum of off-diagonal vals
-      A[i * n + i] = (A[i * n + i] > 0 ? 1 : -1) * (row_sum + 1.0);
-    }
-
-    // 3. Normalize entire matrix so max value is 1.0 (Safe for FP16)
-    // If we don't normalize, A[i][i] can be ~N. N*N overflows FP16.
-    double max_val = 0.0;
-    for (int i = 0; i < n * n; i++) {
-      max_val = std::max(max_val, std::abs(A[i]));
-    }
-    double scale = 1.0 / max_val;
-    for (int i = 0; i < n * n; i++) {
-      A[i] *= scale;
-    }
-
     generate_random_vector_host(x_true, n, 123);
 
     // Compute b = A * x_true
@@ -221,55 +194,46 @@ void benchmark_comparison() {
       }
     }
 
-    // 1. Run FP64 baseline
+    // Run FP64 baseline
     double fp64_time;
-    int fp64_result = solve_lu_fp64(A, b, x_ref, n, &fp64_time);
+    int fp64_result = solve_lu_fp64(A, b, x_fp64, n, &fp64_time);
+    double fp64_err =
+        (fp64_result == 0) ? relative_error(x_fp64, x_true, n) : -1.0;
 
-    // 2. Run FP32-IR
-    int iters_fp32;
-    MixedPrecisionTiming time_fp32;
-    int res_fp32 = solve_mixed_precision_ir(A, b, x_fp32, n, 10, 1e-12,
-                                            &iters_fp32, &time_fp32);
-    double speedup_fp32 =
-        (fp64_result == 0) ? fp64_time / time_fp32.total_ms : 0.0;
+    // Run Mixed-Precision IR
+    int ir_iters;
+    MixedPrecisionTiming ir_timing;
+    int ir_result = solve_mixed_precision_ir(A, b, x_ir, n, 10, 1e-12,
+                                             &ir_iters, &ir_timing);
+    double ir_err = (ir_result == 0) ? relative_error(x_ir, x_true, n) : -1.0;
 
-    // 3. Run FP16-TC-IR (New Block LU)
-    int iters_fp16;
-    MixedPrecisionTiming time_fp16;
-    int res_fp16 = solve_tensor_core_ir(A, b, x_fp16, n, 10, 1e-12, &iters_fp16,
-                                        &time_fp16);
-    double speedup_fp16 =
-        (fp64_result == 0) ? fp64_time / time_fp16.total_ms : 0.0;
+    // Calculate speedup
+    double speedup = (ir_result == 0 && fp64_result == 0)
+                         ? fp64_time / ir_timing.total_ms
+                         : 0.0;
 
-    double err_fp16 =
-        (res_fp16 == 0) ? relative_error(x_fp16, x_true, n) : -1.0;
-
-    // Print comparison
-    if (fp64_result == 0) {
+    // Print results
+    if (fp64_result == 0 && ir_result == 0) {
       std::cout << std::setw(6) << n << std::fixed << std::setprecision(2)
-                << std::setw(10) << fp64_time << std::setw(10)
-                << time_fp32.total_ms << std::setw(10) << time_fp16.total_ms
-                << std::setw(7) << speedup_fp32 << "x" << std::setw(7)
-                << speedup_fp16 << "x" << std::scientific
-                << std::setprecision(1) << std::setw(12) << err_fp16
-                << std::endl;
+                << std::setw(12) << fp64_time << std::setw(12)
+                << ir_timing.total_ms << std::setw(10) << speedup << "x"
+                << std::setw(8) << ir_iters << std::scientific
+                << std::setprecision(1) << std::setw(12) << fp64_err
+                << std::setw(12) << ir_err << std::endl;
     } else {
-      std::cout << std::setw(6) << n << "  ERROR: FP64=" << fp64_result
-                << " FP32=" << res_fp32 << " FP16=" << res_fp16 << std::endl;
+      std::cout << std::setw(6) << n << "  ERROR" << std::endl;
     }
 
     delete[] A;
     delete[] b;
-    delete[] x_ref;
-    delete[] x_fp32;
-    delete[] x_fp16;
+    delete[] x_fp64;
+    delete[] x_ir;
     delete[] x_true;
   }
 
-  std::cout << std::string(80, '-') << std::endl;
-  std::cout << "FP32(ms) = solve_mixed_precision_ir (TF32 on A100)"
-            << std::endl;
-  std::cout << "FP16(ms) = solve_tensor_core_ir (Manual Block FP16 LU)"
+  std::cout << std::string(84, '-') << std::endl;
+  std::cout << "Speedup > 1.0x means IR is faster than FP64" << std::endl;
+  std::cout << "IR Error should be close to FP64 Error (both ~1e-14)"
             << std::endl;
 }
 
