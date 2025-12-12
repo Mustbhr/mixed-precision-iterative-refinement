@@ -291,6 +291,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   CUDA_CHECK(cudaMalloc(&d_info_block, sizeof(int)));
 
   float alpha_f = 1.0f;
+  float minus_one_f = -1.0f;
   __half alpha_h = 1.0;
   __half minus_one_h = -1.0;
   __half beta_h = 0.0;
@@ -366,10 +367,10 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
 
       // GEMM
       CUBLAS_CHECK(cublasGemmEx(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, m_update,
-                                n_update, k_update, &minus_one_h,
+                                n_update, k_update, &minus_one_f,
                                 d_L_panel_fp16, CUDA_R_16F, m_update, // A (L21)
                                 d_U_panel_fp16, CUDA_R_16F, k_update, // B (U12)
-                                &alpha_h, d_A22, CUDA_R_32F, n,       // C (A22)
+                                &alpha_f, d_A22, CUDA_R_32F, n,       // C (A22)
                                 CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     }
   }
