@@ -58,6 +58,15 @@ int solve_mixed_precision_ir(
     MixedPrecisionTiming *timing // Output: detailed timing breakdown
 );
 
+// Phase 3: Tensor Core Solver (Manual Block LU with FP16)
+int solve_tensor_core_ir(
+    const double *A_host, const double *b_host, double *x_host, int n,
+    int max_iterations,          // Max refinement iterations
+    double tolerance,            // Convergence tolerance
+    int *iterations_used,        // Output: actual iterations
+    MixedPrecisionTiming *timing // Output: detailed timing breakdown
+);
+
 /**
  * Compute residual: r = b - Ax
  * Returns residual norm ||r||₂

@@ -17,12 +17,21 @@ target_link_libraries(mixed_precision_solver
     CUDA::cudart
 )
 
+# Tensor Core solver - Manual Block LU with FP16 (CUDA code)
+add_library(tensor_core_solver solvers/tensor_core_solver.cu)
+target_link_libraries(tensor_core_solver
+    CUDA::cublas
+    CUDA::cusolver
+    CUDA::cudart
+)
+
 # Main executable
 add_executable(mixed_precision_ir main.cu)
 target_link_libraries(mixed_precision_ir
     matrix_utils
     baseline_solver
     mixed_precision_solver
+    tensor_core_solver
     CUDA::cublas
     CUDA::cusolver
     CUDA::cudart

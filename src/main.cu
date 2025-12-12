@@ -169,13 +169,14 @@ void benchmark_comparison() {
 
   std::cout << "\n"
             << std::setw(6) << "Size" << std::setw(12) << "FP64(ms)"
-            << std::setw(12) << "IR(ms)" << std::setw(10) << "Speedup"
-            << std::setw(8) << "Iters" << std::setw(12) << "FP64 Err"
-            << std::setw(12) << "IR Err" << std::endl;
-  std::cout << std::string(84, '-') << std::endl;
+            << std::setw(12) << "IR(ms)" << std::setw(12) << "TC(ms)"
+            << std::setw(8) << "Spd(IR)" << std::setw(8) << "Spd(TC)"
+            << std::setw(10) << "FP64 Err" << std::setw(10) << "TC Err"
+            << std::endl;
+  std::cout << std::string(100, '-') << std::endl;
 
   int sizes[] = {1024,  2048,  4096,  8192,  10000, 12000,
-                 16000, 20000, 24000, 32000, 40000, 50000};
+                 16000, 20000, 24000, 32000, 40000};
 
   for (int n : sizes) {
     double *A = new double[n * n];
@@ -208,19 +209,36 @@ void benchmark_comparison() {
                                              &ir_iters, &ir_timing);
     double ir_err = (ir_result == 0) ? relative_error(x_ir, x_true, n) : -1.0;
 
-    // Calculate speedup
-    double speedup = (ir_result == 0 && fp64_result == 0)
-                         ? fp64_time / ir_timing.total_ms
-                         : 0.0;
+    // Run Tensor Core IR (Phase 3)
+    int tc_iters;
+    MixedPrecisionTiming tc_timing;
+    // We reuse x_ir buffer for now or allocate new? Using x_ir is fine if we
+    // copy data out or don't need ir result anymore. Better to allocate
+    // separate buffer to verify both. For now we will overwrite x_ir to keep
+    // output simple or add x_tc. Let's create specific pointer at top of loop.
+    // Re-using x_ir for TC result for simplicity of print.
+    double *x_tc = new double[n];
+    int tc_result =
+        solve_tensor_core_ir(A, b, x_tc, n, 10, 1e-12, &tc_iters, &tc_timing);
+    double tc_err = (tc_result == 0) ? relative_error(x_tc, x_true, n) : -1.0;
+
+    // Calculate speedups
+    double speedup_ir = (ir_result == 0 && fp64_result == 0)
+                            ? fp64_time / ir_timing.total_ms
+                            : 0.0;
+    double speedup_tc = (tc_result == 0 && fp64_result == 0)
+                            ? fp64_time / tc_timing.total_ms
+                            : 0.0;
 
     // Print results
-    if (fp64_result == 0 && ir_result == 0) {
+    if (fp64_result == 0) {
       std::cout << std::setw(6) << n << std::fixed << std::setprecision(2)
                 << std::setw(12) << fp64_time << std::setw(12)
-                << ir_timing.total_ms << std::setw(10) << speedup << "x"
-                << std::setw(8) << ir_iters << std::scientific
-                << std::setprecision(1) << std::setw(12) << fp64_err
-                << std::setw(12) << ir_err << std::endl;
+                << ir_timing.total_ms << std::setw(12) << tc_timing.total_ms
+                << std::setw(8) << speedup_ir << "x" << std::setw(8)
+                << speedup_tc << "x" << std::scientific << std::setprecision(1)
+                << std::setw(10) << fp64_err << std::setw(10) << tc_err
+                << std::endl;
     } else {
       std::cout << std::setw(6) << n << "  ERROR" << std::endl;
     }
@@ -229,13 +247,13 @@ void benchmark_comparison() {
     delete[] b;
     delete[] x_fp64;
     delete[] x_ir;
+    delete[] x_tc;
     delete[] x_true;
   }
 
-  std::cout << std::string(84, '-') << std::endl;
-  std::cout << "Speedup > 1.0x means IR is faster than FP64" << std::endl;
-  std::cout << "IR Error should be close to FP64 Error (both ~1e-14)"
-            << std::endl;
+  std::cout << std::string(100, '-') << std::endl;
+  std::cout << "IR = FP32 Factorization (Standard)" << std::endl;
+  std::cout << "TC = FP16 Block Factorization (Tensor Cores)" << std::endl;
 }
 
 // ============================================================================
