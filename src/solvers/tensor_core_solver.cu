@@ -134,8 +134,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   // 1. Allocate Memory
   double *d_A_fp64, *d_b_fp64, *d_x_fp64, *d_r_fp64, *d_d_fp64;
   float *d_A_fp32, *d_r_fp32;
-  int *d_ipiv, *d_info; // Only used for the diagonal block
-
+  // d_ipiv and d_info unused globally, we use local block versions.
   CUDA_CHECK(cudaMalloc(&d_A_fp64, n * n * sizeof(double)));
   CUDA_CHECK(cudaMalloc(&d_b_fp64, n * sizeof(double)));
   CUDA_CHECK(cudaMalloc(&d_x_fp64, n * sizeof(double)));
@@ -366,7 +365,8 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   // ====================================================================================
   // Same logic as mixed_precision_solver.cu
 
-  cublasDscal(blas_handle, n, &beta_h, d_r_fp64, 1); // zero residual? no need.
+  double beta_zero = 0.0;
+  cublasDscal(blas_handle, n, &beta_zero, d_r_fp64, 1);
 
   double nrm_b = 0.0;
   cublasDnrm2(blas_handle, n, d_b_fp64, 1, &nrm_b);
@@ -456,8 +456,6 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   cudaFree(d_d_fp64);
   cudaFree(d_A_fp32);
   cudaFree(d_r_fp32);
-  cudaFree(d_ipiv);
-  cudaFree(d_info);
   cudaFree(d_L_panel_fp16);
   cudaFree(d_U_panel_fp16);
 
