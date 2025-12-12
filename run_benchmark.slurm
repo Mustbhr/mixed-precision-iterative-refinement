@@ -23,7 +23,7 @@ make -j4 precision_benchmark
 
 if [ $? -eq 0 ]; then
     echo "Running Precision Benchmark..."
-    ./src/precision_benchmark
+    ./bin/precision_benchmark
 else
     echo "Build failed!"
     exit 1
