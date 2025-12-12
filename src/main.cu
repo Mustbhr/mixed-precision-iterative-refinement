@@ -174,7 +174,8 @@ void benchmark_comparison() {
             << std::setw(12) << "IR Err" << std::endl;
   std::cout << std::string(84, '-') << std::endl;
 
-  int sizes[] = {1024, 2048, 4096, 8192, 10000, 12000, 16000, 20000, 24000};
+  int sizes[] = {1024,  2048,  4096,  8192,  10000, 12000,
+                 16000, 20000, 24000, 32000, 40000, 70000};
 
   for (int n : sizes) {
     double *A = new double[n * n];
