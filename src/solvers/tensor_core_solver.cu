@@ -499,4 +499,3 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   cublasDestroy(blas_handle);
   return 0;
 }
-```
