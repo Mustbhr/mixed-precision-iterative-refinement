@@ -112,12 +112,63 @@ void cast_fp32_to_fp16_strided(const float *d_src, int lda, __half *d_dst,
                                                     cols);
 }
 
-void apply_pivots(float *d_A, int lda, const int *d_ipiv, int B, int width) {
-  if (width <= 0)
+/**
+ * Apply Pivots (LASWP equivalent)
+ * Swaps rows in the trailing submatrix based on ipiv buffer.
+ * A_panel_start points to A[k, k+B] (The top-left of the trailing matrix
+ * 'Right') BUT we need to swap rows starting from ROW k. So we pass the pointer
+ * to the requested column start, but row 0? No, simpler: Pass pointer to A[0,
+ * k+B].
+ *
+ * wait. Standard LAPACK apply_pivots applies to the whole row?
+ * We only need to swap rows in the columns we haven't processed yet (k+B to N).
+ * Columns 0 to k+B-1 are already factored/used. Do we need to swap them?
+ * In standard LU (getrf), pivoting is applied to the WHOLE column usually?
+ * Actually for "Right Looking", we only need to pivot the active trailing
+ * matrix to preserve the submatrix property for the next step. However, the L
+ * part (columns 0..k) should mathematically distinct.
+ *
+ * Let's stick to the Right-Looking update:
+ * We swap rows in A[k:N, k+B:N].
+ *
+ * k: global offset of the current panel (row index offset)
+ * ipiv: pivots relative to row k
+ */
+__global__ void apply_pivots_kernel(float *A, int lda, const int *ipiv,
+                                    int num_pivots, int k, int cols_to_update) {
+  int c = blockIdx.x * blockDim.x +
+          threadIdx.x; // column index in the trailing matrix (0..rem-1)
+  if (c >= cols_to_update)
+    return;
+
+  // The trailing matrix starts at A[0,0] offset properly by caller?
+  // Let's assume A points to A[0, k+B].
+  // We iterate through the 'num_pivots' pivots.
+  for (int i = 0; i < num_pivots; ++i) {
+    int pivot_idx_rel = ipiv[i] - 1; // 0-based relative to k
+    int row1_abs = k + i;
+    int row2_abs = k + pivot_idx_rel;
+
+    if (row1_abs != row2_abs) {
+      // Swap A[row1, c] with A[row2, c]
+      float *p1 = A + c * lda + row1_abs;
+      float *p2 = A + c * lda + row2_abs;
+      float val = *p1;
+      *p1 = *p2;
+      *p2 = val;
+    }
+  }
+}
+
+void apply_pivots(float *d_A_base, int lda, const int *d_ipiv, int num_pivots,
+                  int k, int cols_to_update) {
+  if (cols_to_update <= 0)
     return;
   int blockSize = 256;
-  int numBlocks = (width + blockSize - 1) / blockSize;
-  apply_pivots_kernel<<<numBlocks, blockSize>>>(d_A, lda, d_ipiv, B, width);
+  int numBlocks = (cols_to_update + blockSize - 1) / blockSize;
+  // d_A_base should point to the first column to be updated (col k+B), row 0.
+  apply_pivots_kernel<<<numBlocks, blockSize>>>(d_A_base, lda, d_ipiv,
+                                                num_pivots, k, cols_to_update);
 }
 
 __global__ void matrix_cast_fp64_to_fp32_kernel(const double *src, float *dst,
@@ -171,7 +222,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   // 1. Allocate Memory
   double *d_A_fp64, *d_b_fp64, *d_x_fp64, *d_r_fp64, *d_d_fp64;
   float *d_A_fp32, *d_r_fp32;
-  // d_ipiv and d_info unused globally, we use local block versions.
+
   CUDA_CHECK(cudaMalloc(&d_A_fp64, n * n * sizeof(double)));
   CUDA_CHECK(cudaMalloc(&d_b_fp64, n * sizeof(double)));
   CUDA_CHECK(cudaMalloc(&d_x_fp64, n * sizeof(double)));
@@ -180,9 +231,6 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
 
   CUDA_CHECK(cudaMalloc(&d_A_fp32, n * n * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_r_fp32, n * sizeof(float)));
-
-  // We only need pivoting for the block size B, not N
-  // But let's allocate a small buffer for block pivot later.
 
   // Transpose Copy A and b to device (FP64)
   double *A_col = new double[n * n];
@@ -200,7 +248,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   CUDA_CHECK(cudaMemset(d_x_fp64, 0, n * sizeof(double)));
 
   // ====================================================================================
-  // 2. FACTORIZATION PHASE (Manual Block LU)
+  // 2. FACTORIZATION PHASE (Manual Block LU with Tall Panels)
   // ====================================================================================
   cudaEventRecord(start_factor);
 
@@ -213,25 +261,32 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   }
 
   // 2.2 Block LU Loop
-  int B = 512; // Block size (tunable!!!!)
+  int B = 512; // Block size
 
-  // Buffers for FP16 update (allocated once)
-  // Panels will be at most B columns wide by N rows tall
+  // Buffers for FP16 update
+  // Max size would be N x B for L_panel and B x N for U_panel?
+  // Optimized: We need Cast Buffers for the Update GEMM.
+  // Update is: A22 -= L21 * U12
+  // L21 Size: (N-k-B) x B
+  // U12 Size: B x (N-k-B)
+  // We allocate max N*B
   __half *d_L_panel_fp16, *d_U_panel_fp16;
   CUDA_CHECK(cudaMalloc(&d_L_panel_fp16, n * B * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&d_U_panel_fp16, B * n * sizeof(__half)));
 
-  // Pre-allocate workspaces for diagonal factorization (allocated once)
+  // Pre-allocate workspaces for diagonal factorization
+  // We need query for MxN where M=N, N=B (Max case)
   int lwork_block = 0;
-  // Query max workspace needed for size B x B
-  float *d_Diagonal_dummy = d_A_fp32; // pointer just for query
+  float *d_Diagonal_dummy = d_A_fp32;
+  // Query for M=N, N=B
   CUSOLVER_CHECK(cusolverDnSgetrf_bufferSize(
-      solver_handle, B, B, d_Diagonal_dummy, n, &lwork_block));
+      solver_handle, n, B, d_Diagonal_dummy, n, &lwork_block));
 
   float *d_work_block;
   CUDA_CHECK(cudaMalloc(&d_work_block, lwork_block * sizeof(float)));
   int *d_ipiv_block;
-  CUDA_CHECK(cudaMalloc(&d_ipiv_block, B * sizeof(int))); // Max B pivots
+  CUDA_CHECK(cudaMalloc(
+      &d_ipiv_block, n * sizeof(int))); // Must hold min(M,N) for largest panel
   int *d_info_block;
   CUDA_CHECK(cudaMalloc(&d_info_block, sizeof(int)));
 
@@ -242,95 +297,80 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
 
   for (int k = 0; k < n; k += B) {
     int actual_B = std::min(B, n - k);
-    int rem = n - (k + actual_B);
-
-    // Pointers into the FP32 matrix d_A_fp32
-    // d_Diagonal: Top-Left of the current block
-    float *d_Diagonal = d_A_fp32 + k * n + k;
+    int rem = n - (k + actual_B); // Remaining columns/rows
+    int rows_in_panel = n - k;
 
     // -------------------------------------------------------------
-    // Step A: Factorize Diagonal Block (FP32)
+    // Step A: Factorize Tall Panel (FP32)
     // -------------------------------------------------------------
-    // lwork_block was queried for max B, so it's sufficient.
-    CUSOLVER_CHECK(cusolverDnSgetrf(solver_handle, actual_B, actual_B,
-                                    d_Diagonal, n, d_work_block, d_ipiv_block,
+    // Panel starts at A[k, k]. Size: rows_in_panel x actual_B.
+    float *d_Panel = d_A_fp32 + k * n + k;
+
+    // Sgetrf on (N-k) x B matrix.
+    // Result: L is stored in lower part (and below diagonal block), U in
+    // diagonal block upper part. Pivots applied to this panel internally and
+    // stored in d_ipiv_block.
+    CUSOLVER_CHECK(cusolverDnSgetrf(solver_handle, rows_in_panel, actual_B,
+                                    d_Panel, n, d_work_block, d_ipiv_block,
                                     d_info_block));
 
     if (rem > 0) {
       // -------------------------------------------------------------
-      // CRITICAL: Apply Pivots to Right Panel
+      // Step B: Apply Pivots to the Trailing Matrix (Right)
       // -------------------------------------------------------------
-      // The pivots from d_Diagonal (A[k:k+actual_B, k:k+actual_B]) must be
-      // applied to the rows of the right panel (A[k:k+actual_B, k+actual_B:n]).
-      // The right panel starts at column k+actual_B, row k.
-      float *d_RightPanel_Start = d_A_fp32 + (k + actual_B) * n + k;
-      apply_pivots(d_RightPanel_Start, n, d_ipiv_block, actual_B, rem);
+      // We apply pivots to columns k+B to N.
+      // Rows affected: k to N.
+      // Offset: A + (k+B)*n (Start of first column of Right submatrix, row 0)
+      // Wait, apply_pivots needs to access row indices 'k+...'
+      float *d_Trailing_Cols_Start = d_A_fp32 + (k + actual_B) * n;
+      apply_pivots(d_Trailing_Cols_Start, n, d_ipiv_block, actual_B, k, rem);
 
       // -------------------------------------------------------------
-      // Step B: Update Right Panel U -> TRSM
+      // Step C: Update U_12 (Top-Right Block) -> TRSM
       // -------------------------------------------------------------
-      // Solve L_kk * U_k,rest = A_k,rest
-      // Right panel starts at col k+B, row k.
-      float *d_Right = d_A_fp32 + (k + actual_B) * n + k;
+      // Solve L_11 * U_12 = A_12
+      // L_11: B x B Unit Lower Triangular at A[k, k]
+      // A_12: B x rem matrix at A[k, k+B] (After pivoting)
+      // Note: A_12 is technically just the top B rows of the trailing columns.
 
-      // Side=Left, Lower Triangular, No Transpose, Unit Diagonal
-      CUBLAS_CHECK(cublasStrsm(blas_handle, CUBLAS_SIDE_LEFT,
-                               CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
-                               CUBLAS_DIAG_UNIT, actual_B, rem, &alpha_f,
-                               d_Diagonal, n, d_Right, n));
+      float *d_L11 = d_A_fp32 + k * n + k;
+      float *d_A12 = d_A_fp32 + (k + actual_B) * n + k;
 
-      // -------------------------------------------------------------
-      // Step C: Update Bottom Panel L -> TRSM
-      // -------------------------------------------------------------
-      // Solve L_rest,k * U_kk = A_rest,k
-      // Bottom panel starts at col k, row k+B.
-      float *d_Bottom = d_A_fp32 + k * n + (k + actual_B);
-
-      // Side=Right, Upper Triangular, No Transpose, Non-Unit Diagonal
-      CUBLAS_CHECK(cublasStrsm(blas_handle, CUBLAS_SIDE_RIGHT,
-                               CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
-                               CUBLAS_DIAG_NON_UNIT, rem, actual_B, &alpha_f,
-                               d_Diagonal, n, d_Bottom, n));
+      CUBLAS_CHECK(cublasStrsm(
+          blas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
+          CUBLAS_DIAG_UNIT, actual_B, rem, &alpha_f, d_L11, n, d_A12, n));
 
       // -------------------------------------------------------------
       // Step D: Schur Complement Update (FP16 GEMM)
       // -------------------------------------------------------------
-      // A_trailing -= L_bottom * U_right
-      // Trailing submatrix at col k+B, row k+B
-      float *d_Trailing = d_A_fp32 + (k + actual_B) * n + (k + actual_B);
+      // A_22 -= L_21 * U_12
+      // A_22: (N-k-B) x rem at A[k+B, k+B]
+      // L_21: (N-k-B) x B at A[k+B, k]
+      // U_12: B x rem at A[k, k+B] (Which was just updated by TRSM)
 
-      // Cast input panels to FP16
-      // L_bottom (rem x actual_B, lda=n) -> FP16 Buffer (rem x actual_B,
-      // lda=rem) U_right  (actual_B x rem, lda=n) -> FP16 Buffer (actual_B x
-      // rem, lda=actual_B)
+      int m_update = n - (k + actual_B); // rows in A22
+      int n_update = rem;                // cols in A22
+      int k_update = actual_B;           // inner dim
 
-      // NOTE: d_Bottom is (rem rows, actual_B cols)
-      cast_fp32_to_fp16_strided(d_Bottom, n, d_L_panel_fp16, rem, actual_B);
+      float *d_A22 = d_A_fp32 + (k + actual_B) * n + (k + actual_B);
+      float *d_L21 = d_A_fp32 + k * n + (k + actual_B);
+      float *d_U12 = d_A_fp32 + (k + actual_B) * n + k;
 
-      // NOTE: d_Right is (actual_B rows, rem cols)
-      cast_fp32_to_fp16_strided(d_Right, n, d_U_panel_fp16, actual_B, rem);
+      // Cast L_21 to FP16
+      // Dimensions: m_update x k_update
+      cast_fp32_to_fp16_strided(d_L21, n, d_L_panel_fp16, m_update, k_update);
 
-      // GEMM: C = alpha * A * B + beta * C
-      // We want: Trailing = -1.0 * L * U + 1.0 * Trailing
-      // Since Trailing is FP32, we can set C_type to CUDA_R_32F.
-      // Inputs are CUDA_R_16F. Computation is CUDA_R_32F (Tensor Cores).
+      // Cast U_12 to FP16
+      // Dimensions: k_update x n_update
+      cast_fp32_to_fp16_strided(d_U12, n, d_U_panel_fp16, k_update, n_update);
 
-      // L_panel_fp16: rem x actual_B (Col Major)
-      // U_panel_fp16: actual_B x rem (Col Major)
-      // Result: rem x rem
-
-      // Note: cublasGemmEx expects C to be contiguous or strided?
-      // "strideC" isn't an explicit arg in GemmEx unless using
-      // GemmStridedBatched. Wait, GemmEx supports "ldc". We can set ldc = n.
-
-      CUBLAS_CHECK(cublasGemmEx(
-          blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, rem, rem, actual_B,
-          &minus_one_h, d_L_panel_fp16, CUDA_R_16F, rem, // A (L_panel)
-          d_U_panel_fp16, CUDA_R_16F, actual_B,          // B (U_panel)
-          &alpha_h,                  // Beta = 1.0 (accumulate)
-          d_Trailing, CUDA_R_32F, n, // C (Trailing Submatrix)
-          CUDA_R_32F,                // Compute Type
-          CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+      // GEMM
+      CUBLAS_CHECK(cublasGemmEx(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, m_update,
+                                n_update, k_update, &minus_one_h,
+                                d_L_panel_fp16, CUDA_R_16F, m_update, // A (L21)
+                                d_U_panel_fp16, CUDA_R_16F, k_update, // B (U12)
+                                &alpha_h, d_A22, CUDA_R_32F, n,       // C (A22)
+                                CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     }
   }
 
