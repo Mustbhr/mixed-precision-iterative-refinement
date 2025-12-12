@@ -67,6 +67,40 @@ __global__ void cast_fp32_to_fp16_strided_kernel(const float *src, int lda,
   }
 }
 
+/**
+ * Apply Pivots (LASWP equivalent)
+ * Swaps rows in the right panel based on ipiv buffer.
+ * A is the matrix pointer to the START of the panel (k, k+B)
+ * ipiv is the pivot array for the current block (length B)
+ * B is the block size
+ * n is the leading dimension (stride)
+ * width is the width of the panel (remaining columns)
+ */
+__global__ void apply_pivots_kernel(float *A, int lda, const int *ipiv, int B,
+                                    int width) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= width)
+    return;
+
+  // Each thread handles one column of the panel
+  // We iterate through the B pivots
+  for (int i = 0; i < B; ++i) {
+    int pivot_row = ipiv[i] - 1; // 1-based to 0-based
+    int current_row = i;
+
+    if (pivot_row != current_row) {
+      // Swap A[current_row, tid] with A[pivot_row, tid]
+      // A is column-major, so A[row, col] is A + col * lda + row
+      float *row1_ptr = A + tid * lda + current_row;
+      float *row2_ptr = A + tid * lda + pivot_row;
+
+      float temp = *row1_ptr;
+      *row1_ptr = *row2_ptr;
+      *row2_ptr = temp;
+    }
+  }
+}
+
 // ========================================================================================
 // HELPER FUNCTIONS
 // ========================================================================================
@@ -78,10 +112,13 @@ void cast_fp32_to_fp16_strided(const float *d_src, int lda, __half *d_dst,
                                                     cols);
 }
 
-// Reuse the conversion logic from mixed_precision_solver for initial/final
-// conversions? We will just implement clean copies here to be self-contained.
-// Ideally, we'd link to a common util, but simple kernels are cheap to
-// duplicate.
+void apply_pivots(float *d_A, int lda, const int *d_ipiv, int B, int width) {
+  if (width <= 0)
+    return;
+  int blockSize = 256;
+  int numBlocks = (width + blockSize - 1) / blockSize;
+  apply_pivots_kernel<<<numBlocks, blockSize>>>(d_A, lda, d_ipiv, B, width);
+}
 
 __global__ void matrix_cast_fp64_to_fp32_kernel(const double *src, float *dst,
                                                 int n) {
@@ -176,23 +213,32 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   }
 
   // 2.2 Block LU Loop
-  int B = 512; // Block size (tunable)
+  int B = 512; // Block size (tunable!!!!)
 
-  // Buffers for FP16 update
+  // Buffers for FP16 update (allocated once)
   // Panels will be at most B columns wide by N rows tall
   __half *d_L_panel_fp16, *d_U_panel_fp16;
   CUDA_CHECK(cudaMalloc(&d_L_panel_fp16, n * B * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&d_U_panel_fp16, B * n * sizeof(__half)));
 
+  // Pre-allocate workspaces for diagonal factorization (allocated once)
+  int lwork_block = 0;
+  // Query max workspace needed for size B x B
+  float *d_Diagonal_dummy = d_A_fp32; // pointer just for query
+  CUSOLVER_CHECK(cusolverDnSgetrf_bufferSize(
+      solver_handle, B, B, d_Diagonal_dummy, n, &lwork_block));
+
+  float *d_work_block;
+  CUDA_CHECK(cudaMalloc(&d_work_block, lwork_block * sizeof(float)));
+  int *d_ipiv_block;
+  CUDA_CHECK(cudaMalloc(&d_ipiv_block, B * sizeof(int))); // Max B pivots
+  int *d_info_block;
+  CUDA_CHECK(cudaMalloc(&d_info_block, sizeof(int)));
+
   float alpha_f = 1.0f;
   __half alpha_h = 1.0;
   __half minus_one_h = -1.0;
   __half beta_h = 0.0;
-
-  // Pre-allocate small workspaces for diagonal factorization
-  int lwork_block = 0;
-  // Query max workspace needed for size B
-  // Just a rough max check or we do it inside loop
 
   for (int k = 0; k < n; k += B) {
     int actual_B = std::min(B, n - k);
@@ -205,32 +251,21 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
     // -------------------------------------------------------------
     // Step A: Factorize Diagonal Block (FP32)
     // -------------------------------------------------------------
-    CUSOLVER_CHECK(cusolverDnSgetrf_bufferSize(
-        solver_handle, actual_B, actual_B, d_Diagonal, n, &lwork_block));
-
-    float *d_work_block;
-    CUDA_CHECK(cudaMalloc(&d_work_block, lwork_block * sizeof(float)));
-    int *d_ipiv_block;
-    CUDA_CHECK(cudaMalloc(&d_ipiv_block, actual_B * sizeof(int)));
-    int *d_info_block;
-    CUDA_CHECK(cudaMalloc(&d_info_block, sizeof(int)));
-
+    // lwork_block was queried for max B, so it's sufficient.
     CUSOLVER_CHECK(cusolverDnSgetrf(solver_handle, actual_B, actual_B,
                                     d_Diagonal, n, d_work_block, d_ipiv_block,
                                     d_info_block));
 
-    // Note: d_ipiv_block contains pivots relative to 0..actual_B-1.
-    // We are NOT applying these pivots to the left/right panels in this
-    // simplified version. In a rigorous implementation, we MUST swap rows in
-    // A[k:k+B, k+B:n] based on pivots. For strictly diagonally dominant
-    // matrices (which main.cu generates), pivoting is usually identity. We SKIP
-    // applying pivots to panels for speed/simplicity in V1.
-
-    CUDA_CHECK(cudaFree(d_work_block));
-    CUDA_CHECK(cudaFree(d_ipiv_block));
-    CUDA_CHECK(cudaFree(d_info_block));
-
     if (rem > 0) {
+      // -------------------------------------------------------------
+      // CRITICAL: Apply Pivots to Right Panel
+      // -------------------------------------------------------------
+      // The pivots from d_Diagonal (A[k:k+actual_B, k:k+actual_B]) must be
+      // applied to the rows of the right panel (A[k:k+actual_B, k+actual_B:n]).
+      // The right panel starts at column k+actual_B, row k.
+      float *d_RightPanel_Start = d_A_fp32 + (k + actual_B) * n + k;
+      apply_pivots(d_RightPanel_Start, n, d_ipiv_block, actual_B, rem);
+
       // -------------------------------------------------------------
       // Step B: Update Right Panel U -> TRSM
       // -------------------------------------------------------------
@@ -309,6 +344,9 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   // cleanup temp implementation buffers
   cudaFree(d_L_panel_fp16);
   cudaFree(d_U_panel_fp16);
+  cudaFree(d_work_block);
+  cudaFree(d_ipiv_block);
+  cudaFree(d_info_block);
 
   // ====================================================================================
   // 3. INITIAL SOLVE (FP32)
@@ -456,10 +494,9 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   cudaFree(d_d_fp64);
   cudaFree(d_A_fp32);
   cudaFree(d_r_fp32);
-  cudaFree(d_L_panel_fp16);
-  cudaFree(d_U_panel_fp16);
 
   cusolverDnDestroy(solver_handle); // correct casing
   cublasDestroy(blas_handle);
   return 0;
 }
+```
