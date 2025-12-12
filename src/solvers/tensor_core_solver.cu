@@ -256,287 +256,212 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   {
     int blockSize = 256;
     int numBlocks = (n * n + blockSize - 1) / blockSize;
-    matrix_cast_fp64_to_fp32_kernel<<<numBlocks, blockSize>>>(d_A_fp64,
-                                                              d_A_fp32, n);
-  }
+    // L_11: B x B Unit Lower Triangular at A[k, k]
+    // A_12: B x rem matrix at A[k, k+B] (After pivoting)
+    // Note: A_12 is technically just the top B rows of the trailing columns.
 
-  // 2.2 Block LU Loop
-  int B = 512; // Block size
+    float *d_L11 = d_A_fp32 + k * n + k;
+    float *d_A12 = d_A_fp32 + (k + actual_B) * n + k;
 
-  // Buffers for FP16 update
-  // Max size would be N x B for L_panel and B x N for U_panel?
-  // Optimized: We need Cast Buffers for the Update GEMM.
-  // Update is: A22 -= L21 * U12
-  // L21 Size: (N-k-B) x B
-  // U12 Size: B x (N-k-B)
-  // We allocate max N*B
-  __half *d_L_panel_fp16, *d_U_panel_fp16;
-  CUDA_CHECK(cudaMalloc(&d_L_panel_fp16, n * B * sizeof(__half)));
-  CUDA_CHECK(cudaMalloc(&d_U_panel_fp16, B * n * sizeof(__half)));
-
-  // Pre-allocate workspaces for diagonal factorization
-  // We need query for MxN where M=N, N=B (Max case)
-  int lwork_block = 0;
-  float *d_Diagonal_dummy = d_A_fp32;
-  // Query for M=N, N=B
-  CUSOLVER_CHECK(cusolverDnSgetrf_bufferSize(
-      solver_handle, n, B, d_Diagonal_dummy, n, &lwork_block));
-
-  float *d_work_block;
-  CUDA_CHECK(cudaMalloc(&d_work_block, lwork_block * sizeof(float)));
-  int *d_ipiv_block;
-  CUDA_CHECK(cudaMalloc(
-      &d_ipiv_block, n * sizeof(int))); // Must hold min(M,N) for largest panel
-  int *d_info_block;
-  CUDA_CHECK(cudaMalloc(&d_info_block, sizeof(int)));
-
-  float alpha_f = 1.0f;
-  float minus_one_f = -1.0f;
-  __half alpha_h = 1.0;
-  __half minus_one_h = -1.0;
-  __half beta_h = 0.0;
-
-  for (int k = 0; k < n; k += B) {
-    int actual_B = std::min(B, n - k);
-    int rem = n - (k + actual_B); // Remaining columns/rows
-    int rows_in_panel = n - k;
-
-    // -------------------------------------------------------------
-    // Step A: Factorize Tall Panel (FP32)
-    // -------------------------------------------------------------
-    // Panel starts at A[k, k]. Size: rows_in_panel x actual_B.
-    float *d_Panel = d_A_fp32 + k * n + k;
-
-    // Sgetrf on (N-k) x B matrix.
-    // Result: L is stored in lower part (and below diagonal block), U in
-    // diagonal block upper part. Pivots applied to this panel internally and
-    // stored in d_ipiv_block.
-    CUSOLVER_CHECK(cusolverDnSgetrf(solver_handle, rows_in_panel, actual_B,
-                                    d_Panel, n, d_work_block, d_ipiv_block,
-                                    d_info_block));
-
-    if (rem > 0) {
-      // -------------------------------------------------------------
-      // Step B: Apply Pivots to the Trailing Matrix (Right)
-      // -------------------------------------------------------------
-      // We apply pivots to columns k+B to N.
-      // Rows affected: k to N.
-      // Offset: A + (k+B)*n (Start of first column of Right submatrix, row 0)
-      // Wait, apply_pivots needs to access row indices 'k+...'
-      float *d_Trailing_Cols_Start = d_A_fp32 + (k + actual_B) * n;
-      apply_pivots(d_Trailing_Cols_Start, n, d_ipiv_block, actual_B, k, rem);
-
-      // -------------------------------------------------------------
-      // Step C: Update U_12 (Top-Right Block) -> TRSM
-      // -------------------------------------------------------------
-      // Solve L_11 * U_12 = A_12
-      // L_11: B x B Unit Lower Triangular at A[k, k]
-      // A_12: B x rem matrix at A[k, k+B] (After pivoting)
-      // Note: A_12 is technically just the top B rows of the trailing columns.
-
-      float *d_L11 = d_A_fp32 + k * n + k;
-      float *d_A12 = d_A_fp32 + (k + actual_B) * n + k;
-
-      CUBLAS_CHECK(cublasStrsm(
-          blas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
-          CUBLAS_DIAG_UNIT, actual_B, rem, &alpha_f, d_L11, n, d_A12, n));
-
-      // -------------------------------------------------------------
-      // Step D: Schur Complement Update (FP16 GEMM)
-      // -------------------------------------------------------------
-      // A_22 -= L_21 * U_12
-      // A_22: (N-k-B) x rem at A[k+B, k+B]
-      // L_21: (N-k-B) x B at A[k+B, k]
-      // U_12: B x rem at A[k, k+B] (Which was just updated by TRSM)
-
-      int m_update = n - (k + actual_B); // rows in A22
-      int n_update = rem;                // cols in A22
-      int k_update = actual_B;           // inner dim
-
-      float *d_A22 = d_A_fp32 + (k + actual_B) * n + (k + actual_B);
-      float *d_L21 = d_A_fp32 + k * n + (k + actual_B);
-      float *d_U12 = d_A_fp32 + (k + actual_B) * n + k;
-
-      // Cast L_21 to FP16
-      // Dimensions: m_update x k_update
-      cast_fp32_to_fp16_strided(d_L21, n, d_L_panel_fp16, m_update, k_update);
-
-      // Cast U_12 to FP16
-      // Dimensions: k_update x n_update
-      cast_fp32_to_fp16_strided(d_U12, n, d_U_panel_fp16, k_update, n_update);
-
-      // GEMM
-      CUBLAS_CHECK(cublasGemmEx(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, m_update,
-                                n_update, k_update, &minus_one_f,
-                                d_L_panel_fp16, CUDA_R_16F, m_update, // A (L21)
-                                d_U_panel_fp16, CUDA_R_16F, k_update, // B (U12)
-                                &alpha_f, d_A22, CUDA_R_32F, n,       // C (A22)
-                                CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-    }
-  }
-
-  cudaEventRecord(stop_factor);
-  cudaEventSynchronize(stop_factor);
-  float factor_ms = 0;
-  cudaEventElapsedTime(&factor_ms, start_factor, stop_factor);
-  if (timing)
-    timing->factorization_ms = factor_ms;
-
-  // cleanup temp implementation buffers
-  cudaFree(d_L_panel_fp16);
-  cudaFree(d_U_panel_fp16);
-  cudaFree(d_work_block);
-  cudaFree(d_ipiv_block);
-  cudaFree(d_info_block);
-
-  // ====================================================================================
-  // 3. INITIAL SOLVE (FP32)
-  // ====================================================================================
-  // d_A_fp32 now contains L and U factors (approximate).
-  // Solve Ax = b -> LUx = b
-
-  // Copy b_fp64 -> x_fp64 (as RHS workspace) -> convert to x_fp32
-  // Or just allocate temp FP32 RHS
-  float *d_x_fp32;
-  CUDA_CHECK(cudaMalloc(&d_x_fp32, n * sizeof(float)));
-
-  // Cast b -> float
-  // reuse our strided kernel with rows=n, cols=1, lda=n?
-  // Just simple copy
-  {
-    int blockSize = 256;
-    int numBlocks = (n + blockSize - 1) / blockSize;
-    matrix_cast_fp64_to_fp32_kernel<<<numBlocks, blockSize>>>(
-        d_b_fp64, d_x_fp32, n); // treated as n x 1
-  }
-
-  // getrs needs ipiv.
-  // WAIT. We factorized in blocks. We did NOT produce a global ipiv.
-  // We produced `d_A_fp32` which has L and U in place, but WITHOUT global
-  // pivoting. So `cusolverDnSgetrs` WILL NOT WORK properly if we pass
-  // random/null ipiv. `cusolverDnSgetrs` expects the output of `Sgetrf`.
-
-  // SOLUTION: Since we manually computed LU (without pivoting), we must
-  // manually solve using TRSM. We cannot use `getrs`. Solve Ly = b (Forward)
-  // Solve Ux = y (Backward)
-
-  // Forward Solve: L * y = b. L is Unit Lower.
-  CUBLAS_CHECK(cublasStrsm(
-      blas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
-      CUBLAS_DIAG_UNIT, n, 1, &alpha_f, d_A_fp32, n, d_x_fp32, n));
-
-  // Backward Solve: U * x = y. U is Non-Unit Upper.
-  CUBLAS_CHECK(cublasStrsm(
-      blas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
-      CUBLAS_DIAG_NON_UNIT, n, 1, &alpha_f, d_A_fp32, n, d_x_fp32, n));
-
-  // Cast result to FP64
-  {
-    int blockSize = 256;
-    int numBlocks = (n + blockSize - 1) / blockSize;
-    matrix_cast_fp32_to_fp64_kernel<<<numBlocks, blockSize>>>(d_x_fp32,
-                                                              d_x_fp64, n);
-  }
-  cudaFree(d_x_fp32); // done with initial solve
-
-  // ====================================================================================
-  // 4. ITERATIVE REFINEMENT LOOP (FP64)
-  // ====================================================================================
-  // Same logic as mixed_precision_solver.cu
-
-  double beta_zero = 0.0;
-  cublasDscal(blas_handle, n, &beta_zero, d_r_fp64, 1);
-
-  double nrm_b = 0.0;
-  cublasDnrm2(blas_handle, n, d_b_fp64, 1, &nrm_b);
-
-  int k = 0;
-  for (k = 0; k < max_iterations; k++) {
-    // 4.1 Compute r = b - Ax (FP64)
-    // r = b
-    CUDA_CHECK(cudaMemcpy(d_r_fp64, d_b_fp64, n * sizeof(double),
-                          cudaMemcpyDeviceToDevice));
-
-    // r = r - A * x
-    double alpha_d = -1.0;
-    double beta_d = 1.0;
-
-    // d_A_fp64 is the original matrix. d_x_fp64 is current solution.
-    CUBLAS_CHECK(cublasDgemv(blas_handle, CUBLAS_OP_N, n, n, &alpha_d, d_A_fp64,
-                             n, d_x_fp64, 1, &beta_d, d_r_fp64, 1));
-
-    // Check convergence
-    double nrm_r = 0.0;
-    CUBLAS_CHECK(cublasDnrm2(blas_handle, n, d_r_fp64, 1, &nrm_r));
-    if (timing)
-      timing->final_residual = nrm_r / nrm_b;
-
-    if (nrm_r / nrm_b < tolerance) {
-      break;
-    }
-
-    // 4.2 Solve correction Ad = r (approximated uses FP32 LU)
-    // Cast r (FP64) -> r (FP32)
-    {
-      int blockSize = 256;
-      int numBlocks = (n + blockSize - 1) / blockSize;
-      matrix_cast_fp64_to_fp32_kernel<<<numBlocks, blockSize>>>(d_r_fp64,
-                                                                d_r_fp32, n);
-    }
-
-    // Manual TRSM Solve again
-    // Forward
     CUBLAS_CHECK(cublasStrsm(
         blas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
-        CUBLAS_DIAG_UNIT, n, 1, &alpha_f, d_A_fp32, n, d_r_fp32, n));
-    // Backward
-    CUBLAS_CHECK(cublasStrsm(
-        blas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
-        CUBLAS_DIAG_NON_UNIT, n, 1, &alpha_f, d_A_fp32, n, d_r_fp32, n));
+        CUBLAS_DIAG_UNIT, actual_B, rem, &alpha_f, d_L11, n, d_A12, n));
 
-    // Cast d (FP32) -> d (FP64)
-    // d_r_fp32 holds the result 'd' in single precision.
-    {
-      int blockSize = 256;
-      int numBlocks = (n + blockSize - 1) / blockSize;
-      matrix_cast_fp32_to_fp64_kernel<<<numBlocks, blockSize>>>(d_r_fp32,
-                                                                d_d_fp64, n);
-    }
+    // -------------------------------------------------------------
+    // Step D: Schur Complement Update (FP16 GEMM)
+    // -------------------------------------------------------------
+    // A_22 -= L_21 * U_12
+    // A_22: (N-k-B) x rem at A[k+B, k+B]
+    // L_21: (N-k-B) x B at A[k+B, k]
+    // U_12: B x rem at A[k, k+B] (Which was just updated by TRSM)
 
-    // 4.3 Update x = x + d (FP64)
-    double alpha_one = 1.0;
-    CUBLAS_CHECK(
-        cublasDaxpy(blas_handle, n, &alpha_one, d_d_fp64, 1, d_x_fp64, 1));
+    int m_update = n - (k + actual_B); // rows in A22
+    int n_update = rem;                // cols in A22
+    int k_update = actual_B;           // inner dim
+
+    float *d_A22 = d_A_fp32 + (k + actual_B) * n + (k + actual_B);
+    float *d_L21 = d_A_fp32 + k * n + (k + actual_B);
+    float *d_U12 = d_A_fp32 + (k + actual_B) * n + k;
+
+    // Cast L_21 to FP16
+    // Dimensions: m_update x k_update
+    cast_fp32_to_fp16_strided(d_L21, n, d_L_panel_fp16, m_update, k_update);
+
+    // Cast U_12 to FP16
+    // Dimensions: k_update x n_update
+    cast_fp32_to_fp16_strided(d_U12, n, d_U_panel_fp16, k_update, n_update);
+
+    // GEMM
+    CUBLAS_CHECK(cublasGemmEx(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, m_update,
+                              n_update, k_update, &minus_one_f, d_L_panel_fp16,
+                              CUDA_R_16F, m_update,                 // A (L21)
+                              d_U_panel_fp16, CUDA_R_16F, k_update, // B (U12)
+                              &alpha_f, d_A22, CUDA_R_32F, n,       // C (A22)
+                              CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+  }
+}
+
+cudaEventRecord(stop_factor);
+cudaEventSynchronize(stop_factor);
+float factor_ms = 0;
+cudaEventElapsedTime(&factor_ms, start_factor, stop_factor);
+if (timing)
+  timing->factorization_ms = factor_ms;
+
+// cleanup temp implementation buffers
+cudaFree(d_L_panel_fp16);
+cudaFree(d_U_panel_fp16);
+cudaFree(d_work_block);
+cudaFree(d_ipiv_block);
+cudaFree(d_info_block);
+
+// ====================================================================================
+// 3. INITIAL SOLVE (FP32)
+// ====================================================================================
+// d_A_fp32 now contains L and U factors (approximate).
+// Solve Ax = b -> LUx = b
+
+// Copy b_fp64 -> x_fp64 (as RHS workspace) -> convert to x_fp32
+// Or just allocate temp FP32 RHS
+float *d_x_fp32;
+CUDA_CHECK(cudaMalloc(&d_x_fp32, n * sizeof(float)));
+
+// Cast b -> float
+// reuse our strided kernel with rows=n, cols=1, lda=n?
+// Just simple copy
+{
+  int blockSize = 256;
+  int numBlocks = (n + blockSize - 1) / blockSize;
+  matrix_cast_fp64_to_fp32_kernel<<<numBlocks, blockSize>>>(
+      d_b_fp64, d_x_fp32, n); // treated as n x 1
+}
+
+// getrs needs ipiv.
+// WAIT. We factorized in blocks. We did NOT produce a global ipiv.
+// We produced `d_A_fp32` which has L and U in place, but WITHOUT global
+// pivoting. So `cusolverDnSgetrs` WILL NOT WORK properly if we pass
+// random/null ipiv. `cusolverDnSgetrs` expects the output of `Sgetrf`.
+
+// SOLUTION: Since we manually computed LU (without pivoting), we must
+// manually solve using TRSM. We cannot use `getrs`. Solve Ly = b (Forward)
+// Solve Ux = y (Backward)
+
+// Forward Solve: L * y = b. L is Unit Lower.
+CUBLAS_CHECK(cublasStrsm(blas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+                         CUBLAS_OP_N, CUBLAS_DIAG_UNIT, n, 1, &alpha_f,
+                         d_A_fp32, n, d_x_fp32, n));
+
+// Backward Solve: U * x = y. U is Non-Unit Upper.
+CUBLAS_CHECK(cublasStrsm(blas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+                         CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, 1, &alpha_f,
+                         d_A_fp32, n, d_x_fp32, n));
+
+// Cast result to FP64
+{
+  int blockSize = 256;
+  int numBlocks = (n + blockSize - 1) / blockSize;
+  matrix_cast_fp32_to_fp64_kernel<<<numBlocks, blockSize>>>(d_x_fp32, d_x_fp64,
+                                                            n);
+}
+cudaFree(d_x_fp32); // done with initial solve
+
+// ====================================================================================
+// 4. ITERATIVE REFINEMENT LOOP (FP64)
+// ====================================================================================
+// Same logic as mixed_precision_solver.cu
+
+double beta_zero = 0.0;
+cublasDscal(blas_handle, n, &beta_zero, d_r_fp64, 1);
+
+double nrm_b = 0.0;
+cublasDnrm2(blas_handle, n, d_b_fp64, 1, &nrm_b);
+
+int k = 0;
+for (k = 0; k < max_iterations; k++) {
+  // 4.1 Compute r = b - Ax (FP64)
+  // r = b
+  CUDA_CHECK(cudaMemcpy(d_r_fp64, d_b_fp64, n * sizeof(double),
+                        cudaMemcpyDeviceToDevice));
+
+  // r = r - A * x
+  double alpha_d = -1.0;
+  double beta_d = 1.0;
+
+  // d_A_fp64 is the original matrix. d_x_fp64 is current solution.
+  CUBLAS_CHECK(cublasDgemv(blas_handle, CUBLAS_OP_N, n, n, &alpha_d, d_A_fp64,
+                           n, d_x_fp64, 1, &beta_d, d_r_fp64, 1));
+
+  // Check convergence
+  double nrm_r = 0.0;
+  CUBLAS_CHECK(cublasDnrm2(blas_handle, n, d_r_fp64, 1, &nrm_r));
+  if (timing)
+    timing->final_residual = nrm_r / nrm_b;
+
+  if (nrm_r / nrm_b < tolerance) {
+    break;
   }
 
-  if (iterations_used)
-    *iterations_used = k;
-
-  // Copy result back
-  CUDA_CHECK(
-      cudaMemcpy(x_host, d_x_fp64, n * sizeof(double), cudaMemcpyDeviceToHost));
-
-  cudaEventRecord(stop_total);
-  cudaEventSynchronize(stop_total);
-  float total_ms = 0;
-  cudaEventElapsedTime(&total_ms, start_total, stop_total);
-
-  if (timing) {
-    timing->total_ms = total_ms;
-    timing->refinement_ms =
-        total_ms - timing->factorization_ms; // Rough estimate
+  // 4.2 Solve correction Ad = r (approximated uses FP32 LU)
+  // Cast r (FP64) -> r (FP32)
+  {
+    int blockSize = 256;
+    int numBlocks = (n + blockSize - 1) / blockSize;
+    matrix_cast_fp64_to_fp32_kernel<<<numBlocks, blockSize>>>(d_r_fp64,
+                                                              d_r_fp32, n);
   }
 
-  // Cleanup
-  cudaFree(d_A_fp64);
-  cudaFree(d_b_fp64);
-  cudaFree(d_x_fp64);
-  cudaFree(d_r_fp64);
-  cudaFree(d_d_fp64);
-  cudaFree(d_A_fp32);
-  cudaFree(d_r_fp32);
+  // Manual TRSM Solve again
+  // Forward
+  CUBLAS_CHECK(cublasStrsm(
+      blas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
+      CUBLAS_DIAG_UNIT, n, 1, &alpha_f, d_A_fp32, n, d_r_fp32, n));
+  // Backward
+  CUBLAS_CHECK(cublasStrsm(
+      blas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+      CUBLAS_DIAG_NON_UNIT, n, 1, &alpha_f, d_A_fp32, n, d_r_fp32, n));
 
-  cusolverDnDestroy(solver_handle); // correct casing
-  cublasDestroy(blas_handle);
-  return 0;
+  // Cast d (FP32) -> d (FP64)
+  // d_r_fp32 holds the result 'd' in single precision.
+  {
+    int blockSize = 256;
+    int numBlocks = (n + blockSize - 1) / blockSize;
+    matrix_cast_fp32_to_fp64_kernel<<<numBlocks, blockSize>>>(d_r_fp32,
+                                                              d_d_fp64, n);
+  }
+
+  // 4.3 Update x = x + d (FP64)
+  double alpha_one = 1.0;
+  CUBLAS_CHECK(
+      cublasDaxpy(blas_handle, n, &alpha_one, d_d_fp64, 1, d_x_fp64, 1));
+}
+
+if (iterations_used)
+  *iterations_used = k;
+
+// Copy result back
+CUDA_CHECK(cudaMemcpy(x_host, d_x_fp64, n * sizeof(double),
+                      cudaMemcpyDeviceToHost));
+
+cudaEventRecord(stop_total);
+cudaEventSynchronize(stop_total);
+float total_ms = 0;
+cudaEventElapsedTime(&total_ms, start_total, stop_total);
+
+if (timing) {
+  timing->total_ms = total_ms;
+  timing->refinement_ms = total_ms - timing->factorization_ms; // Rough estimate
+}
+
+// Cleanup
+cudaFree(d_A_fp64);
+cudaFree(d_b_fp64);
+cudaFree(d_x_fp64);
+cudaFree(d_r_fp64);
+cudaFree(d_d_fp64);
+cudaFree(d_A_fp32);
+cudaFree(d_r_fp32);
+
+cusolverDnDestroy(solver_handle); // correct casing
+cublasDestroy(blas_handle);
+return 0;
 }
