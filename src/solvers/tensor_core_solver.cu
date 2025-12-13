@@ -262,7 +262,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   }
 
   // 2.2 Block LU Loop
-  int B = 512; // Block size (Tuned to 512 for A100 saturation)
+  int B = 2048; // Increase block size to reduce pivoting overhead
 
   // Buffers for FP16 update
   __half *d_L_panel_fp16, *d_U_panel_fp16;
@@ -289,6 +289,11 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   __half minus_one_h = -1.0;
   __half beta_h = 0.0;
 
+  float time_panel = 0, time_pivot = 0, time_update = 0;
+  cudaEvent_t t_start, t_stop;
+  cudaEventCreate(&t_start);
+  cudaEventCreate(&t_stop);
+
   for (int k = 0; k < n; k += B) {
     int actual_B = std::min(B, n - k);
     int rem = n - (k + actual_B); // Remaining columns/rows
@@ -297,6 +302,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
     // -------------------------------------------------------------
     // Step A: Factorize Tall Panel (FP32)
     // -------------------------------------------------------------
+    cudaEventRecord(t_start);
     // Panel starts at A[k, k]. Size: rows_in_panel x actual_B.
     float *d_Panel = d_A_fp32 + k * n + k;
 
@@ -304,11 +310,17 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
     CUSOLVER_CHECK(cusolverDnSgetrf(solver_handle, rows_in_panel, actual_B,
                                     d_Panel, n, d_work_block, d_ipiv_block,
                                     d_info_block));
+    cudaEventRecord(t_stop);
+    cudaEventSynchronize(t_stop);
+    float ms;
+    cudaEventElapsedTime(&ms, t_start, t_stop);
+    time_panel += ms;
 
     if (rem > 0) {
       // -------------------------------------------------------------
       // Step B: Apply Pivots to the Trailing Matrix (Right)
       // -------------------------------------------------------------
+      cudaEventRecord(t_start);
       // Offset: A + (k+B)*n (Start of first column of Right submatrix, row k
       // due to sgetrf pivot indexing?) Wait, cusolverDnSlaswp expects A to be
       // the start of the matrix. If pivots are relative to row k (because we
@@ -320,10 +332,16 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
       float *d_Trailing_Rows_Start = d_A_fp32 + (k + actual_B) * n + k;
       CUSOLVER_CHECK(cusolverDnSlaswp(solver_handle, rem, d_Trailing_Rows_Start,
                                       n, 1, actual_B, d_ipiv_block, 1));
+      cudaEventRecord(t_stop);
+      cudaEventSynchronize(t_stop);
+      cudaEventElapsedTime(&ms, t_start, t_stop);
+      time_pivot += ms;
 
       // -------------------------------------------------------------
-      // Step C: Update U_12 (Top-Right Block) -> TRSM
+      // Step C & D: Update (TRSM + GEMM)
       // -------------------------------------------------------------
+      cudaEventRecord(t_start);
+      // Step C: Update U_12 (Top-Right Block) -> TRSM
       // Solve L_11 * U_12 = A_12
       // L_11: B x B Unit Lower Triangular at A[k, k]
       // A_12: B x rem matrix at A[k, k+B] (After pivoting)
@@ -335,9 +353,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
           blas_handle, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
           CUBLAS_DIAG_UNIT, actual_B, rem, &alpha_f, d_L11, n, d_A12, n));
 
-      // -------------------------------------------------------------
       // Step D: Schur Complement Update (FP16 GEMM)
-      // -------------------------------------------------------------
       // A_22 -= L_21 * U_12
       // A_22: (N-k-B) x rem at A[k+B, k+B]
       // L_21: (N-k-B) x B at A[k+B, k]
@@ -364,8 +380,19 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
                                 d_U_panel_fp16, CUDA_R_16F, k_update, // B (U12)
                                 &alpha_f, d_A22, CUDA_R_32F, n,       // C (A22)
                                 CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+
+      cudaEventRecord(t_stop);
+      cudaEventSynchronize(t_stop);
+      cudaEventElapsedTime(&ms, t_start, t_stop);
+      time_update += ms;
     }
   }
+  std::cout << "DEBUG BREAKDOWN (N=" << n << "): Panel=" << time_panel
+            << "ms Pivot=" << time_pivot << "ms Update=" << time_update << "ms"
+            << std::endl;
+
+  cudaEventDestroy(t_start);
+  cudaEventDestroy(t_stop);
 
   cudaEventRecord(stop_factor);
   cudaEventSynchronize(stop_factor);
