@@ -234,16 +234,25 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   CUDA_CHECK(cudaMalloc(&d_r_fp32, n * sizeof(float)));
 
   // Transpose Copy A and b to device (FP64)
-  double *A_col = new double[n * n];
-  for (int i = 0; i < n; i++)
-    for (int j = 0; j < n; j++)
-      A_col[j * n + i] = A_host[i * n + j];
-
-  CUDA_CHECK(cudaMemcpy(d_A_fp64, A_col, n * n * sizeof(double),
+  // OPTIMIZATION: Do transpose on GPU to avoid slow CPU loop (O(N^2))
+  double *d_A_row;
+  CUDA_CHECK(cudaMalloc(&d_A_row, n * n * sizeof(double)));
+  CUDA_CHECK(cudaMemcpy(d_A_row, A_host, n * n * sizeof(double),
                         cudaMemcpyHostToDevice));
+
+  // Transpose d_A_row (Row Major) -> d_A_fp64 (Col Major)
+  // Effectively A^T in Col Major is A in Row Major.
+  // Use geam: C = alpha * op(A) + beta * op(B)
+  double alpha_t = 1.0;
+  double beta_t = 0.0;
+  CUBLAS_CHECK(cublasDgeam(blas_handle, CUBLAS_OP_T, CUBLAS_OP_N, n, n,
+                           &alpha_t, d_A_row, n, &beta_t, d_A_row, n, d_A_fp64,
+                           n));
+
+  CUDA_CHECK(cudaFree(d_A_row));
+
   CUDA_CHECK(
       cudaMemcpy(d_b_fp64, b_host, n * sizeof(double), cudaMemcpyHostToDevice));
-  delete[] A_col;
 
   // Initialize x = 0
   CUDA_CHECK(cudaMemset(d_x_fp64, 0, n * sizeof(double)));
