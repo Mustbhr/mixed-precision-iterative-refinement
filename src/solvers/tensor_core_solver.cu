@@ -411,33 +411,24 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   // ====================================================================================
   // 3. INITIAL SOLVE (FP32)
   // ====================================================================================
+  cudaEvent_t start_solve, stop_solve;
+  cudaEventCreate(&start_solve);
+  cudaEventCreate(&stop_solve);
+  cudaEventRecord(start_solve);
+
   // d_A_fp32 now contains L and U factors (approximate).
   // Solve Ax = b -> LUx = b
 
-  // Copy b_fp64 -> x_fp64 (as RHS workspace) -> convert to x_fp32
-  // Or just allocate temp FP32 RHS
+  // Copy b_fp64 -> x_fp32 (as RHS workspace)
   float *d_x_fp32;
   CUDA_CHECK(cudaMalloc(&d_x_fp32, n * sizeof(float)));
 
-  // Cast b -> float
-  // reuse our strided kernel with rows=n, cols=1, lda=n?
-  // Just simple copy
   {
-    int blockSize = 256;
+    int blockSize = 512;
     int numBlocks = (n + blockSize - 1) / blockSize;
-    matrix_cast_fp64_to_fp32_kernel<<<numBlocks, blockSize>>>(
-        d_b_fp64, d_x_fp32, n); // treated as n x 1
+    matrix_cast_fp64_to_fp32_kernel<<<numBlocks, blockSize>>>(d_b_fp64,
+                                                              d_x_fp32, n);
   }
-
-  // getrs needs ipiv.
-  // WAIT. We factorized in blocks. We did NOT produce a global ipiv.
-  // We produced `d_A_fp32` which has L and U in place, but WITHOUT global
-  // pivoting. So `cusolverDnSgetrs` WILL NOT WORK properly if we pass
-  // random/null ipiv. `cusolverDnSgetrs` expects the output of `Sgetrf`.
-
-  // SOLUTION: Since we manually computed LU (without pivoting), we must
-  // manually solve using TRSM. We cannot use `getrs`. Solve Ly = b (Forward)
-  // Solve Ux = y (Backward)
 
   // Forward Solve: L * y = b. L is Unit Lower.
   CUBLAS_CHECK(cublasStrsm(
@@ -451,17 +442,23 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
 
   // Cast result to FP64
   {
-    int blockSize = 256;
+    int blockSize = 512;
     int numBlocks = (n + blockSize - 1) / blockSize;
     matrix_cast_fp32_to_fp64_kernel<<<numBlocks, blockSize>>>(d_x_fp32,
                                                               d_x_fp64, n);
   }
-  cudaFree(d_x_fp32); // done with initial solve
+  cudaFree(d_x_fp32);
+
+  cudaEventRecord(stop_solve);
+  cudaEventSynchronize(stop_solve);
 
   // ====================================================================================
   // 4. ITERATIVE REFINEMENT LOOP (FP64)
   // ====================================================================================
-  // Same logic as mixed_precision_solver.cu
+  cudaEvent_t start_refine, stop_refine;
+  cudaEventCreate(&start_refine);
+  cudaEventCreate(&stop_refine);
+  cudaEventRecord(start_refine);
 
   double beta_zero = 0.0;
   cublasDscal(blas_handle, n, &beta_zero, d_r_fp64, 1);
@@ -497,7 +494,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
     // 4.2 Solve correction Ad = r (approximated uses FP32 LU)
     // Cast r (FP64) -> r (FP32)
     {
-      int blockSize = 256;
+      int blockSize = 512;
       int numBlocks = (n + blockSize - 1) / blockSize;
       matrix_cast_fp64_to_fp32_kernel<<<numBlocks, blockSize>>>(d_r_fp64,
                                                                 d_r_fp32, n);
@@ -516,7 +513,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
     // Cast d (FP32) -> d (FP64)
     // d_r_fp32 holds the result 'd' in single precision.
     {
-      int blockSize = 256;
+      int blockSize = 512;
       int numBlocks = (n + blockSize - 1) / blockSize;
       matrix_cast_fp32_to_fp64_kernel<<<numBlocks, blockSize>>>(d_r_fp32,
                                                                 d_d_fp64, n);
@@ -531,20 +528,39 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   if (iterations_used)
     *iterations_used = k;
 
+  cudaEventRecord(stop_refine);
+  cudaEventSynchronize(stop_refine);
+
   // Copy result back
   CUDA_CHECK(
       cudaMemcpy(x_host, d_x_fp64, n * sizeof(double), cudaMemcpyDeviceToHost));
 
   cudaEventRecord(stop_total);
   cudaEventSynchronize(stop_total);
+
   float total_ms = 0;
   cudaEventElapsedTime(&total_ms, start_total, stop_total);
+
+  float time_init = 0, time_solve = 0, time_refine = 0;
+  cudaEventElapsedTime(&time_init, start_total, start_factor);
+  cudaEventElapsedTime(&time_solve, start_solve, stop_solve);
+  cudaEventElapsedTime(&time_refine, start_refine, stop_refine);
+
+  std::cout << "DEBUG FULL (N=" << n << "): Init=" << time_init
+            << "ms Factor=" << factor_ms << "ms Solve=" << time_solve
+            << "ms Refine=" << time_refine << "ms (" << k << " iters)"
+            << std::endl;
 
   if (timing) {
     timing->total_ms = total_ms;
     timing->refinement_ms =
         total_ms - timing->factorization_ms; // Rough estimate
   }
+
+  cudaEventDestroy(start_solve);
+  cudaEventDestroy(stop_solve);
+  cudaEventDestroy(start_refine);
+  cudaEventDestroy(stop_refine);
 
   // Cleanup
   cudaFree(d_A_fp64);
