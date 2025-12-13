@@ -298,11 +298,6 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   __half minus_one_h = -1.0;
   __half beta_h = 0.0;
 
-  float time_panel = 0, time_pivot = 0, time_update = 0;
-  cudaEvent_t t_start, t_stop;
-  cudaEventCreate(&t_start);
-  cudaEventCreate(&t_stop);
-
   for (int k = 0; k < n; k += B) {
     int actual_B = std::min(B, n - k);
     int rem = n - (k + actual_B); // Remaining columns/rows
@@ -311,7 +306,6 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
     // -------------------------------------------------------------
     // Step A: Factorize Tall Panel (FP32)
     // -------------------------------------------------------------
-    cudaEventRecord(t_start);
     // Panel starts at A[k, k]. Size: rows_in_panel x actual_B.
     float *d_Panel = d_A_fp32 + k * n + k;
 
@@ -319,17 +313,11 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
     CUSOLVER_CHECK(cusolverDnSgetrf(solver_handle, rows_in_panel, actual_B,
                                     d_Panel, n, d_work_block, d_ipiv_block,
                                     d_info_block));
-    cudaEventRecord(t_stop);
-    cudaEventSynchronize(t_stop);
-    float ms;
-    cudaEventElapsedTime(&ms, t_start, t_stop);
-    time_panel += ms;
 
     if (rem > 0) {
       // -------------------------------------------------------------
       // Step B: Apply Pivots to the Trailing Matrix (Right)
       // -------------------------------------------------------------
-      cudaEventRecord(t_start);
       // Offset: A + (k+B)*n (Start of first column of Right submatrix, row k
       // due to sgetrf pivot indexing?) Wait, cusolverDnSlaswp expects A to be
       // the start of the matrix. If pivots are relative to row k (because we
@@ -341,15 +329,10 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
       float *d_Trailing_Rows_Start = d_A_fp32 + (k + actual_B) * n + k;
       CUSOLVER_CHECK(cusolverDnSlaswp(solver_handle, rem, d_Trailing_Rows_Start,
                                       n, 1, actual_B, d_ipiv_block, 1));
-      cudaEventRecord(t_stop);
-      cudaEventSynchronize(t_stop);
-      cudaEventElapsedTime(&ms, t_start, t_stop);
-      time_pivot += ms;
 
       // -------------------------------------------------------------
       // Step C & D: Update (TRSM + GEMM)
       // -------------------------------------------------------------
-      cudaEventRecord(t_start);
       // Step C: Update U_12 (Top-Right Block) -> TRSM
       // Solve L_11 * U_12 = A_12
       // L_11: B x B Unit Lower Triangular at A[k, k]
@@ -389,19 +372,8 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
                                 d_U_panel_fp16, CUDA_R_16F, k_update, // B (U12)
                                 &alpha_f, d_A22, CUDA_R_32F, n,       // C (A22)
                                 CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-
-      cudaEventRecord(t_stop);
-      cudaEventSynchronize(t_stop);
-      cudaEventElapsedTime(&ms, t_start, t_stop);
-      time_update += ms;
     }
   }
-  std::cout << "DEBUG BREAKDOWN (N=" << n << "): Panel=" << time_panel
-            << "ms Pivot=" << time_pivot << "ms Update=" << time_update << "ms"
-            << std::endl;
-
-  cudaEventDestroy(t_start);
-  cudaEventDestroy(t_stop);
 
   cudaEventRecord(stop_factor);
   cudaEventSynchronize(stop_factor);
@@ -420,11 +392,6 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   // ====================================================================================
   // 3. INITIAL SOLVE (FP32)
   // ====================================================================================
-  cudaEvent_t start_solve, stop_solve;
-  cudaEventCreate(&start_solve);
-  cudaEventCreate(&stop_solve);
-  cudaEventRecord(start_solve);
-
   // d_A_fp32 now contains L and U factors (approximate).
   // Solve Ax = b -> LUx = b
 
@@ -458,17 +425,9 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   }
   cudaFree(d_x_fp32);
 
-  cudaEventRecord(stop_solve);
-  cudaEventSynchronize(stop_solve);
-
   // ====================================================================================
   // 4. ITERATIVE REFINEMENT LOOP (FP64)
   // ====================================================================================
-  cudaEvent_t start_refine, stop_refine;
-  cudaEventCreate(&start_refine);
-  cudaEventCreate(&stop_refine);
-  cudaEventRecord(start_refine);
-
   double beta_zero = 0.0;
   cublasDscal(blas_handle, n, &beta_zero, d_r_fp64, 1);
 
@@ -537,9 +496,6 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   if (iterations_used)
     *iterations_used = k;
 
-  cudaEventRecord(stop_refine);
-  cudaEventSynchronize(stop_refine);
-
   // Copy result back
   CUDA_CHECK(
       cudaMemcpy(x_host, d_x_fp64, n * sizeof(double), cudaMemcpyDeviceToHost));
@@ -550,26 +506,11 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   float total_ms = 0;
   cudaEventElapsedTime(&total_ms, start_total, stop_total);
 
-  float time_init = 0, time_solve = 0, time_refine = 0;
-  cudaEventElapsedTime(&time_init, start_total, start_factor);
-  cudaEventElapsedTime(&time_solve, start_solve, stop_solve);
-  cudaEventElapsedTime(&time_refine, start_refine, stop_refine);
-
-  std::cout << "DEBUG FULL (N=" << n << "): Init=" << time_init
-            << "ms Factor=" << factor_ms << "ms Solve=" << time_solve
-            << "ms Refine=" << time_refine << "ms (" << k << " iters)"
-            << std::endl;
-
   if (timing) {
     timing->total_ms = total_ms;
     timing->refinement_ms =
         total_ms - timing->factorization_ms; // Rough estimate
   }
-
-  cudaEventDestroy(start_solve);
-  cudaEventDestroy(stop_solve);
-  cudaEventDestroy(start_refine);
-  cudaEventDestroy(stop_refine);
 
   // Cleanup
   cudaFree(d_A_fp64);
