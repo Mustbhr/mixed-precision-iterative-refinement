@@ -56,12 +56,12 @@
 __global__ void cast_fp32_to_fp16_strided_kernel(const float *src, int lda,
                                                  __half *dst, int rows,
                                                  int cols) {
-  int r = blockIdx.y * blockDim.y + threadIdx.y;
-  int c = blockIdx.x * blockDim.x + threadIdx.x;
+  // Optimized for Coalesced Access:
+  // x-dimension (warp) should iterate over ROWS (contiguous in Col-Major)
+  int r = blockIdx.x * blockDim.x + threadIdx.x;
+  int c = blockIdx.y * blockDim.y + threadIdx.y;
 
   if (r < rows && c < cols) {
-    // Source is col-major: src[c * lda + r]
-    // Dest is col-major contiguous: dst[c * rows + r]
     float val = src[c * lda + r];
     dst[c * rows + r] = __float2half(val);
   }
@@ -107,7 +107,8 @@ __global__ void apply_pivots_kernel(float *A, int lda, const int *ipiv, int B,
 void cast_fp32_to_fp16_strided(const float *d_src, int lda, __half *d_dst,
                                int rows, int cols) {
   dim3 block(32, 32);
-  dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
+  // Grid X -> Rows, Grid Y -> Cols
+  dim3 grid((rows + block.x - 1) / block.x, (cols + block.y - 1) / block.y);
   cast_fp32_to_fp16_strided_kernel<<<grid, block>>>(d_src, lda, d_dst, rows,
                                                     cols);
 }
@@ -261,7 +262,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   }
 
   // 2.2 Block LU Loop
-  int B = 256; // Block size (Tuned)
+  int B = 512; // Block size (Tuned to 512 for A100 saturation)
 
   // Buffers for FP16 update
   __half *d_L_panel_fp16, *d_U_panel_fp16;
