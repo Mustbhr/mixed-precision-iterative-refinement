@@ -269,20 +269,23 @@ int solve_mixed_precision_ir(const double *A_host, const double *b_host,
   CUDA_CHECK(cudaMalloc(&d_A_fp32, n * n * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_r_fp32, n * sizeof(float)));
 
-  // Convert A from row-major to column-major
-  double *A_col_major = new double[n * n];
-  for (int i = 0; i < n; i++) {
-    for (int j = 0; j < n; j++) {
-      A_col_major[j * n + i] = A_host[i * n + j];
-    }
-  }
-
-  // Copy data to device
-  CUDA_CHECK(cudaMemcpy(d_A_fp64, A_col_major, n * n * sizeof(double),
+  // Copy data to device (Row Major)
+  double *d_A_row;
+  CUDA_CHECK(cudaMalloc(&d_A_row, n * n * sizeof(double)));
+  CUDA_CHECK(cudaMemcpy(d_A_row, A_host, n * n * sizeof(double),
                         cudaMemcpyHostToDevice));
+
+  // Transpose to Col Major using cuBLAS Geam
+  double alpha_t = 1.0;
+  double beta_t = 0.0;
+  CUBLAS_CHECK(cublasDgeam(blas_handle, CUBLAS_OP_T, CUBLAS_OP_N, n, n,
+                           &alpha_t, d_A_row, n, &beta_t, d_A_row, n, d_A_fp64,
+                           n));
+
+  CUDA_CHECK(cudaFree(d_A_row));
+
   CUDA_CHECK(
       cudaMemcpy(d_b_fp64, b_host, n * sizeof(double), cudaMemcpyHostToDevice));
-  delete[] A_col_major;
 
   // Convert A to FP32 for factorization
   convert_fp64_to_fp32(d_A_fp64, d_A_fp32, n * n);
