@@ -46,8 +46,8 @@ echo "Running Nsight Compute (Kernel Analysis)..."
 ncu \
     --set full \
     --target-processes all \
-    --output=report_kernels_${SLURM_JOB_ID} \
-    --force-overwrite=true \
+    -o report_kernels_${SLURM_JOB_ID} \
+    --force-overwrite \
     --kernel-name-base=function \
     --launch-count 1 \
     $EXE
