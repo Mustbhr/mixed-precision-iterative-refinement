@@ -227,7 +227,7 @@ int solve_lu_fp32(const double *A_host, const double *b_host, double *x_host,
 int solve_mixed_precision_ir(const double *A_host, const double *b_host,
                              double *x_host, int n, int max_iterations,
                              double tolerance, int *iterations_used,
-                             MixedPrecisionTiming *timing) {
+                             MixedPrecisionTiming *timing, bool verbose) {
   cudaEvent_t start_total, stop_total;
   cudaEvent_t start_factor, stop_factor;
   cudaEvent_t start_refine, stop_refine;
@@ -394,8 +394,18 @@ int solve_mixed_precision_ir(const double *A_host, const double *b_host,
     double relative_residual = residual_norm / b_norm;
 
     if (relative_residual < tolerance) {
+      if (verbose) {
+        std::cout << "  [Iter " << iter << "] Residual: " << std::scientific
+                  << std::setprecision(2) << relative_residual << " (Converged)"
+                  << std::endl;
+      }
       iter++; // Count this iteration
       break;  // Converged!
+    }
+
+    if (verbose) {
+      std::cout << "  [Iter " << iter << "] Residual: " << std::scientific
+                << std::setprecision(2) << relative_residual << std::endl;
     }
 
     // ---------------------------------------------------------------------

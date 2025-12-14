@@ -52,19 +52,21 @@ int solve_lu_fp32(const double *A_host, const double *b_host, double *x_host,
  */
 int solve_mixed_precision_ir(
     const double *A_host, const double *b_host, double *x_host, int n,
-    int max_iterations,          // Max refinement iterations (typically 10)
-    double tolerance,            // Convergence tolerance (e.g., 1e-12)
-    int *iterations_used,        // Output: actual iterations
-    MixedPrecisionTiming *timing // Output: detailed timing breakdown
+    int max_iterations,           // Max refinement iterations (typically 10)
+    double tolerance,             // Convergence tolerance (e.g., 1e-12)
+    int *iterations_used,         // Output: actual iterations
+    MixedPrecisionTiming *timing, // Output: detailed timing breakdown
+    bool verbose = false          // Optional: print residual per iteration
 );
 
 // Phase 3: Tensor Core Solver (Manual Block LU with FP16)
 int solve_tensor_core_ir(
     const double *A_host, const double *b_host, double *x_host, int n,
-    int max_iterations,          // Max refinement iterations
-    double tolerance,            // Convergence tolerance
-    int *iterations_used,        // Output: actual iterations
-    MixedPrecisionTiming *timing // Output: detailed timing breakdown
+    int max_iterations,           // Max refinement iterations
+    double tolerance,             // Convergence tolerance
+    int *iterations_used,         // Output: actual iterations
+    MixedPrecisionTiming *timing, // Output: detailed timing breakdown
+    bool verbose = false          // Optional: print residual per iteration
 );
 
 /**

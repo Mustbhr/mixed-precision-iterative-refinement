@@ -331,6 +331,51 @@ void benchmark_timing_breakdown(int n) {
 }
 
 // ============================================================================
+// CONVERGENCE ANALYSIS
+// ============================================================================
+void test_convergence_analysis(int n) {
+  std::cout << "\n==========================================================="
+            << std::endl;
+  std::cout << "CONVERGENCE ANALYSIS: n = " << n << std::endl;
+  std::cout << "==========================================================="
+            << std::endl;
+
+  double *A = new double[n * n];
+  double *b = new double[n];
+  double *x = new double[n];
+  double *x_true = new double[n];
+
+  generate_random_matrix_host(A, n, 42);
+  generate_random_vector_host(x_true, n, 123);
+
+  // Compute b = A * x_true
+  for (int i = 0; i < n; i++) {
+    b[i] = 0.0;
+    for (int j = 0; j < n; j++) {
+      b[i] += A[i * n + j] * x_true[j];
+    }
+  }
+
+  int iters;
+  MixedPrecisionTiming timing;
+
+  // Phase 2 Convergence
+  std::cout << "\n[Phase 2 - FP32 mixed precision]" << std::endl;
+  solve_mixed_precision_ir(A, b, x, n, 10, 1e-12, &iters, &timing,
+                           true); // Verbose = true
+
+  // Phase 3 Convergence
+  std::cout << "\n[Phase 3 - Tensor Core mixed precision]" << std::endl;
+  solve_tensor_core_ir(A, b, x, n, 10, 1e-12, &iters, &timing,
+                       true); // Verbose = true
+
+  delete[] A;
+  delete[] b;
+  delete[] x;
+  delete[] x_true;
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -370,6 +415,9 @@ int main(int argc, char **argv) {
 
   // Detailed timing breakdown for medium-sized problem
   benchmark_timing_breakdown(512);
+
+  // Convergence Analysis (New)
+  test_convergence_analysis(8192);
 
   // Summary
   std::cout << "\n==========================================================="

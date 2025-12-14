@@ -194,7 +194,7 @@ __global__ void matrix_cast_fp32_to_fp64_kernel(const float *src, double *dst,
 int solve_tensor_core_ir(const double *A_host, const double *b_host,
                          double *x_host, int n, int max_iterations,
                          double tolerance, int *iterations_used,
-                         MixedPrecisionTiming *timing) {
+                         MixedPrecisionTiming *timing, bool verbose) {
 
   // Initialize timing
   if (timing) {
@@ -454,6 +454,13 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
     CUBLAS_CHECK(cublasDnrm2(blas_handle, n, d_r_fp64, 1, &nrm_r));
     if (timing)
       timing->final_residual = nrm_r / nrm_b;
+
+    if (verbose) {
+      std::cout << "  [Iter " << k << "] Residual: " << std::scientific
+                << std::setprecision(2) << (nrm_r / nrm_b)
+                << ((nrm_r / nrm_b < tolerance) ? " (Converged)" : "")
+                << std::endl;
+    }
 
     if (nrm_r / nrm_b < tolerance) {
       break;
