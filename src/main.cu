@@ -390,6 +390,33 @@ int main(int argc, char **argv) {
   // Print device info
   printDeviceInfo();
 
+  // Check for profiling mode
+  if (argc > 1 && std::string(argv[1]) == "--profile") {
+    std::cout << ">>> PROFILING MODE ENABLED <<<" << std::endl;
+    std::cout << "Running ONLY Phase 3 (Tensor Core IR) with N=4096"
+              << std::endl;
+
+    int n = 4096;
+    double *A = new double[n * n];
+    double *b = new double[n];
+    double *x = new double[n];
+
+    // Simple init
+    generate_random_matrix_host(A, n, 42);
+    for (int i = 0; i < n; i++)
+      b[i] = 1.0;
+
+    int iters;
+    MixedPrecisionTiming timing;
+    // Verbose = false to avoid printing clutter during profile
+    solve_tensor_core_ir(A, b, x, n, 5, 1e-12, &iters, &timing, false);
+
+    delete[] A;
+    delete[] b;
+    delete[] x;
+    return 0;
+  }
+
   // Phase 1: FP64 baseline tests
   std::cout << "\n==========================================================="
             << std::endl;

@@ -49,8 +49,8 @@ ncu \
     -o report_kernels_${SLURM_JOB_ID} \
     --force-overwrite \
     --kernel-name-base=function \
-    --launch-count 1 \
-    $EXE
+    --launch-count 10 \
+    $EXE --profile
 
 echo "------------------------------------------------"
 echo "Profiling Complete."
