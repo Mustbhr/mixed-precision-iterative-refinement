@@ -33,13 +33,20 @@ Makefile
 results/*.png
 results/*.pdf
 
-# Personal guides (not for repo)
+# Nsight Profiling Reports (Keep local)
+*.ncu-rep
+*.nsys-rep
+
+# Personal guides and Presentation (Not for repo)
 docs/IBEX_GUIDE.md
 docs/GETTING_STARTED.md
 docs/PHASE1_INSTRUCTIONS.md
 docs/profiling_guide.md
+docs/presentation.tex
+docs/presentation_script.md
+docs/PRESENTATION_OUTLINE.md
+docs/IMPLEMENTATION_DETAILS.md
 
 # Keep directory structure
 !results/.gitkeep
 !tests/.gitkeep
-

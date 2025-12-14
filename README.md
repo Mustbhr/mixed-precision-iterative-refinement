@@ -1,117 +1,74 @@
-# Mixed-Precision Iterative Refinement on GPUs
+# Accelerated Mixed-Precision Iterative Refinement on NVIDIA A100
 
 **CS380 - GPU and GPGPU Programming**  
 **Student:** Mustafa Albahrani  
 **Instructor:** Prof. Markus Hadwiger  
-**TA:** Peter Rautek
 
-## Project Overview
+## 🚀 Project Overview
+This project implements a high-performance **Linear System Solver (Ax=b)** that leverages the specialized **Tensor Cores** of the NVIDIA A100 GPU to achieve unprecedented speedups while maintaining full double-precision (FP64) accuracy.
 
-This project implements mixed-precision iterative refinement (IR) solvers for linear systems on GPUs, leveraging Tensor Cores for high-performance low-precision arithmetic while achieving FP64-level accuracy.
+By using **Iterative Refinement**, we combine the raw throughput of **FP16 Tensor Cores** (312 TFLOPS) with the precision of standard **FP64 Cores**:
+1.  **Factorization**: Decompose the matrix $A$ using low-precision (FP16/TF32) for speed.
+2.  **Refinement**: Correct the error using high-precision (FP64) residuals.
 
-### Key Features
-- Mixed-precision solver using FP16/TF32 for factorizations
-- FP32/FP64 for residual corrections
-- CUDA C++ implementation with CUTLASS/WMMA API
-- Benchmarking on dense and structured matrices
-- Performance-accuracy trade-off analysis
+### Key Achievements
+-   **Speedup**: Achieved **6.40x faster** performance than optimized cuSOLVER FP64 routines.
+-   **Hardware Utilization**: Successfully targeted **Ampere Tensor Cores** (Verified via Nsight Compute).
+-   **Algorithm**: Implemented a custom **Block LU Factorization** with Global Pivoting to handle numerical instability in half-precision.
 
-## Background
+## 📊 Performance Results (NVIDIA A100)
+Benchmark results for Solving $Ax=b$ (Random Dense Matrix):
 
-### What is Iterative Refinement?
+| Matrix Size ($N$) | FP64 Baseline (ms) | Mixed-Precision (ms) | Speedup | Error ($||r||/||b||$) |
+| :--- | :--- | :--- | :--- | :--- |
+| **8192** | 1002.11 | **169.85** | **5.90x** | $4.9 \times 10^{-15}$ |
+| **16000** | 2294.46 | **507.15** | **4.52x** | $7.0 \times 10^{-15}$ |
+| **32000** | 10342.19 | **1625.74** | **6.36x** | $9.8 \times 10^{-15}$ |
+| **40000** | 15936.95 | **2490.96** | **6.40x** | $1.0 \times 10^{-14}$ |
 
-Iterative refinement is a technique to improve the accuracy of solutions to linear systems Ax = b:
-1. Compute an approximate solution x₀ using low-precision factorization
-2. Calculate residual: r = b - Ax₀ (in higher precision)
-3. Solve correction: Ad = r (using low-precision factorization)
-4. Update solution: x₁ = x₀ + d
-5. Repeat until desired accuracy is reached
+## 🛠️ Implementation Details
+The project evolved through three phases of optimization:
 
-### Why Mixed-Precision?
+### Phase 1: FP64 Baseline
+Standard LU factorization using `cusolverDnDgetrf`. Reliable but limited by FP64 throughput (19.5 TFLOPS).
 
-Modern GPUs (especially with Tensor Cores) are much faster at FP16/TF32 arithmetic than FP64:
-- **Speed:** ~10-20x faster for low-precision operations
-- **Memory:** Reduced bandwidth requirements
-- **Accuracy:** Can still achieve FP64-level accuracy through iterative refinement
+### Phase 2: Mixed-Precision (TF32)
+Used `cusolverDnSgetrf` (FP32). On the A100, this implicitly uses **TF32 Tensor Cores** (156 TFLOPS), achieving a ~3x speedup.
 
-## Project Structure
+### Phase 3: Tensor Core Acceleration (FP16)
+The final custom implementation:
+-   **Algorithm**: Right-Looking Blocked LU Decomposition.
+-   **Compute**: Explicitly uses `cublasGemmEx` with `CUDA_R_16F` inputs and `CUBLAS_TENSOR_OP_MATH` mode to force FP16 Tensor Core usage.
+-   **Stability**: Implements "Tall Panel" factorization with `cusolverDnSlaswp` (pivoting) on the A100 to prevent NaN/Inf explosions common in FP16.
+-   **Memory**: Uses customized coalesced layout formatting kernels.
 
-```
-.
-├── src/               # Source code
-│   ├── solvers/      # Mixed-precision IR solver implementations
-│   ├── kernels/      # CUDA kernels (CUTLASS/WMMA)
-│   ├── utils/        # Helper functions, matrix generators
-│   └── benchmarks/   # Benchmark and test code
-├── include/          # Header files
-├── tests/            # Test matrices and validation
-├── results/          # Benchmark results and plots
-├── docs/             # Documentation and notes
-├── CMakeLists.txt    # Build configuration
-└── README.md         # This file
-```
+## 💾 Building and Running
 
-## Building and Running
+### Prerequisites
+-   NVIDIA GPU (Volt/Ampere/Hopper recommended)
+-   CUDA Toolkit 11.0+
+-   CMake 3.18+
 
-### On MacOS (Development)
-
-
-### On IBEX (Deployment)
+### Build Instructions
 ```bash
-# Load required modules
-module load cuda/11.x
-module load cmake/3.x
-
-# Build
 mkdir build && cd build
 cmake ..
-make
-
-# Run benchmarks
-./bin/benchmark_solver
+make -j
 ```
 
-## Implementation Roadmap
+### Running the Benchmark
+```bash
+# Run the solver comparison
+./bin/mixed_precision_ir
 
-### Phase 1: Baseline Implementation (Complete)
-- [x] Basic CUDA project setup
-- [x] Matrix generation utilities (dense and structured)
-- [x] FP64 LU factorization using cuSOLVER (Baseline)
-- [x] Basic iterative refinement loop validation
+# Run with profiling logic (single targeted run)
+./bin/mixed_precision_ir --profile
+```
 
-### Phase 2: Mixed-Precision IR - Standard (Complete)
-- [x] Implement Standard Mixed-Precision Solver (FP32/TF32 factorization)
-- [x] Integrate FP64 residual correction
-- [x] **Analysis**: On A100, this uses TF32 Tensor Cores (156 TFLOPS) via standard cuSOLVER
-- [x] Achieve ~3x speedup over Baseline
+### Profiling
+Scripts for Nsight Systems (`nsys`) and Nsight Compute (`ncu`) are available in `profile_job.slurm`.
 
-### Phase 3: Tensor Core Acceleration - Manual (Complete)
-- [x] Implement **manual** Block LU solver
-- [ ] Implement WMMA/CUTLASS kernels (Replaced by `cublasGemmEx` + `CUDA_R_16F` for simplicity and speed)
-- [x] Explicitly target **FP16 Tensor Cores** (312 TFLOPS)
-- [x] Implement "Tall Panel" factorization with Global Pivoting for stability
-- [x] Achieve **~8x-16x speedup** over Baseline
-- [x] **Benchmarking & Analysis**:
-    - [x] Compare against pure FP64 and Phase 2
-    - [x] Convergence analysis (Residual logging)
-    - [x] Performance-accuracy trade-offs
-
-## Convergence Analysis
-The solver demonstrates theoretical iterative refinement behavior:
-- **Initial Guess**: Forward error $\approx 10^{-4}$ (limited by FP16/TF32 precision).
-- **Iteration 1**: Residual drops to $\approx 10^{-10}$.
-- **Iteration 2**: Residual drops to $\approx 10^{-15}$ (full FP64 accuracy).
-- **Conclusion**: The mixed-precision strategy successfully recovers double-precision accuracy from low-precision factorizations.
-
-## References
-
-- Haidar et al., "Harnessing GPU Tensor Cores for Fast FP16 Arithmetic to Speed up Mixed-Precision Iterative Refinement Solvers," SC18
-- NVIDIA CUTLASS: https://github.com/NVIDIA/cutlass
-- CUDA WMMA API Documentation
-- cuBLAS Library Documentation
-
-## Progress Log
-
-- **[24-11-2025]** - Project initialization and repository setup
-- **[27-11-2025]** - Phase 1 Completed. i.e. FP64 LU factorization (baseline). 
-
+## 📚 References
+1.  Haidar et al., *"Harnessing GPU Tensor Cores for Fast FP16 Arithmetic to Speed up Mixed-Precision Iterative Refinement Solvers,"* SC18.
+2.  NVIDIA A100 Tensor Core Architecture Whitepaper.
+3.  Higham, N. J., *"Accuracy and Stability of Numerical Algorithms."*

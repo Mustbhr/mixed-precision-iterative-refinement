@@ -8,9 +8,7 @@
 #include <iostream>
 #include <vector>
 
-// ========================================================================================
 // ERROR CHECKING MACROS
-// ========================================================================================
 #define CUDA_CHECK(call)                                                       \
   do {                                                                         \
     cudaError_t error = call;                                                  \
@@ -41,9 +39,7 @@
     }                                                                          \
   } while (0)
 
-// ========================================================================================
 // KERNELS for Precision Conversion (Strided)
-// ========================================================================================
 
 /**
  * Cast FP32 -> FP16 with Stride
@@ -104,9 +100,8 @@ __global__ void apply_pivots_kernel(float *A, int lda, const int *ipiv, int B,
   }
 }
 
-// ========================================================================================
 // HELPER FUNCTIONS
-// ========================================================================================
+
 void cast_fp32_to_fp16_strided(const float *d_src, int lda, __half *d_dst,
                                int rows, int cols) {
   dim3 block(32, 32);
@@ -118,22 +113,7 @@ void cast_fp32_to_fp16_strided(const float *d_src, int lda, __half *d_dst,
 
 /**
  * Apply Pivots (LASWP equivalent)
- * Swaps rows in the trailing submatrix based on ipiv buffer.
- * A_panel_start points to A[k, k+B] (The top-left of the trailing matrix
- * 'Right') BUT we need to swap rows starting from ROW k. So we pass the pointer
- * to the requested column start, but row 0? No, simpler: Pass pointer to A[0,
- * k+B].
- *
- * wait. Standard LAPACK apply_pivots applies to the whole row?
- * We only need to swap rows in the columns we haven't processed yet (k+B to N).
- * Columns 0 to k+B-1 are already factored/used. Do we need to swap them?
- * In standard LU (getrf), pivoting is applied to the WHOLE column usually?
- * Actually for "Right Looking", we only need to pivot the active trailing
- * matrix to preserve the submatrix property for the next step. However, the L
- * part (columns 0..k) should mathematically distinct.
- *
- * Let's stick to the Right-Looking update:
- * We swap rows in A[k:N, k+B:N].
+ * Swaps rows in the trailing submatrix (A[k:N, k+B:N]) based on ipiv buffer.
  *
  * k: global offset of the current panel (row index offset)
  * ipiv: pivots relative to row k
@@ -145,8 +125,6 @@ __global__ void apply_pivots_kernel(float *A, int lda, const int *ipiv,
   if (c >= cols_to_update)
     return;
 
-  // The trailing matrix starts at A[0,0] offset properly by caller?
-  // Let's assume A points to A[0, k+B].
   // We iterate through the 'num_pivots' pivots.
   for (int i = 0; i < num_pivots; ++i) {
     int pivot_idx_rel = ipiv[i] - 1; // 0-based relative to k
@@ -191,9 +169,7 @@ __global__ void matrix_cast_fp32_to_fp64_kernel(const float *src, double *dst,
   }
 }
 
-// ========================================================================================
 // MAIN SOLVER: FP16 TENSOR CORE ITERATIVE REFINEMENT
-// ========================================================================================
 int solve_tensor_core_ir(const double *A_host, const double *b_host,
                          double *x_host, int n, int max_iterations,
                          double tolerance, int *iterations_used,
@@ -220,7 +196,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   cublasHandle_t blas_handle;
   cusolverDnCreate(&solver_handle);
   cublasCreate(&blas_handle);
-  // CRITICAL: Enable Tensor Cores
+  // Enable Tensor Cores
   cublasSetMathMode(blas_handle, CUBLAS_TENSOR_OP_MATH);
 
   // 1. Allocate Memory
@@ -260,9 +236,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   // Initialize x = 0
   CUDA_CHECK(cudaMemset(d_x_fp64, 0, n * sizeof(double)));
 
-  // ====================================================================================
   // 2. FACTORIZATION PHASE (Manual Block LU with Tall Panels)
-  // ====================================================================================
   cudaEventRecord(start_factor);
 
   // 2.1 Convert FP64 -> FP32 (Full Matrix)
@@ -306,9 +280,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
     int rem = n - (k + actual_B); // Remaining columns/rows
     int rows_in_panel = n - k;
 
-    // -------------------------------------------------------------
     // Step A: Factorize Tall Panel (FP32)
-    // -------------------------------------------------------------
     // Panel starts at A[k, k]. Size: rows_in_panel x actual_B.
     float *d_Panel = d_A_fp32 + k * n + k;
 
@@ -321,21 +293,14 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
       // -------------------------------------------------------------
       // Step B: Apply Pivots to the Trailing Matrix (Right)
       // -------------------------------------------------------------
-      // Offset: A + (k+B)*n (Start of first column of Right submatrix, row k
-      // due to sgetrf pivot indexing?) Wait, cusolverDnSlaswp expects A to be
-      // the start of the matrix. If pivots are relative to row k (because we
-      // passed d_Panel which starts at row k), then we must pass d_Trailing
-      // with row k pointer? 'd_ipiv_block' contains pivots 1-based. If index is
-      // 'p', it swaps row 'p' with 'i'. If we passed d_Panel (row k), 'p' is
-      // likely relative to k? YES. So we should pass pointer to A[k, k+B].
-
+      // We apply row swaps to the remaining columns A[k:N, k+B:N].
+      // d_ipiv_block contains pivots relative to the current panel start (row
+      // k).
       float *d_Trailing_Rows_Start = d_A_fp32 + (k + actual_B) * n + k;
       CUSOLVER_CHECK(cusolverDnSlaswp(solver_handle, rem, d_Trailing_Rows_Start,
                                       n, 1, actual_B, d_ipiv_block, 1));
 
-      // -------------------------------------------------------------
       // Step C & D: Update (TRSM + GEMM)
-      // -------------------------------------------------------------
       // Step C: Update U_12 (Top-Right Block) -> TRSM
       // Solve L_11 * U_12 = A_12
       // L_11: B x B Unit Lower Triangular at A[k, k]
@@ -368,7 +333,7 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
       // Cast U_12 to FP16
       cast_fp32_to_fp16_strided(d_U12, n, d_U_panel_fp16, k_update, n_update);
 
-      // Force Tensor Core Usage (Re-applying fix)
+      // Force Tensor Core Use
       cublasSetMathMode(blas_handle, CUBLAS_TENSOR_OP_MATH);
 
       // GEMM
@@ -395,9 +360,8 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   cudaFree(d_ipiv_block);
   cudaFree(d_info_block);
 
-  // ====================================================================================
   // 3. INITIAL SOLVE (FP32)
-  // ====================================================================================
+  //
   // d_A_fp32 now contains L and U factors (approximate).
   // Solve Ax = b -> LUx = b
 
@@ -431,9 +395,8 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
   }
   cudaFree(d_x_fp32);
 
-  // ====================================================================================
   // 4. ITERATIVE REFINEMENT LOOP (FP64)
-  // ====================================================================================
+
   double beta_zero = 0.0;
   cublasDscal(blas_handle, n, &beta_zero, d_r_fp64, 1);
 
