@@ -4,7 +4,7 @@
 **Student:** Mustafa Albahrani  
 **Instructor:** Prof. Markus Hadwiger  
 
-## 🚀 Project Overview
+## Project Overview
 This project implements a high-performance **Linear System Solver (Ax=b)** that leverages the specialized **Tensor Cores** of the NVIDIA A100 GPU to achieve unprecedented speedups while maintaining full double-precision (FP64) accuracy.
 
 By using **Iterative Refinement**, we combine the raw throughput of **FP16 Tensor Cores** (312 TFLOPS) with the precision of standard **FP64 Cores**:
@@ -16,17 +16,17 @@ By using **Iterative Refinement**, we combine the raw throughput of **FP16 Tenso
 -   **Hardware Utilization**: Successfully targeted **Ampere Tensor Cores** (Verified via Nsight Compute).
 -   **Algorithm**: Implemented a custom **Block LU Factorization** with Global Pivoting to handle numerical instability in half-precision.
 
-## 📊 Performance Results (NVIDIA A100)
+## Performance Results (NVIDIA A100)
 Benchmark results for Solving $Ax=b$ (Random Dense Matrix):
 
 | Matrix Size ($N$) | FP64 Baseline (ms) | Mixed-Precision (ms) | Speedup | Error ($||r||/||b||$) |
-| :--- | :--- | :--- | :--- | :--- |
+| :--- | ---: | ---: | ---: | :--- |
 | **8192** | 1002.11 | **169.85** | **5.90x** | $4.9 \times 10^{-15}$ |
 | **16000** | 2294.46 | **507.15** | **4.52x** | $7.0 \times 10^{-15}$ |
 | **32000** | 10342.19 | **1625.74** | **6.36x** | $9.8 \times 10^{-15}$ |
 | **40000** | 15936.95 | **2490.96** | **6.40x** | $1.0 \times 10^{-14}$ |
 
-## 🛠️ Implementation Details
+## Implementation Details
 The project evolved through three phases of optimization:
 
 ### Phase 1: FP64 Baseline
@@ -42,7 +42,7 @@ The final custom implementation:
 -   **Stability**: Implements "Tall Panel" factorization with `cusolverDnSlaswp` (pivoting) on the A100 to prevent NaN/Inf explosions common in FP16.
 -   **Memory**: Uses customized coalesced layout formatting kernels.
 
-## 💾 Building and Running
+## Building and Running
 
 ### Prerequisites
 -   NVIDIA GPU (Volt/Ampere/Hopper recommended)
@@ -68,7 +68,7 @@ make -j
 ### Profiling
 Scripts for Nsight Systems (`nsys`) and Nsight Compute (`ncu`) are available in `profile_job.slurm`.
 
-## 📚 References
+## References
 1.  Haidar et al., *"Harnessing GPU Tensor Cores for Fast FP16 Arithmetic to Speed up Mixed-Precision Iterative Refinement Solvers,"* SC18.
 2.  NVIDIA A100 Tensor Core Architecture Whitepaper.
 3.  Higham, N. J., *"Accuracy and Stability of Numerical Algorithms."*
