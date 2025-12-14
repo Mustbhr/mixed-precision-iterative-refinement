@@ -22,7 +22,7 @@ cmake .. -DCMAKE_CUDA_FLAGS="-lineinfo -O3 -use_fast_math"
 make -j
 
 # Location of executable
-EXE="./bin/benchmark_solver"
+EXE="./bin/mixed_precision_ir"
 
 echo "Starting Profiling Job on $(hostname)"
 echo "------------------------------------------------"
