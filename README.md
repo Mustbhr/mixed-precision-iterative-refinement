@@ -19,7 +19,7 @@ By using **Iterative Refinement**, we combine the raw throughput of **FP16 Tenso
 ## Performance Results (NVIDIA A100)
 Benchmark results for Solving $Ax=b$ (Random Dense Matrix):
 
-| Matrix Size ($N$) | FP64 Baseline (ms) | Mixed-Precision (ms) | Speedup | Error ($||r||/||b||$) |
+| Matrix Size | FP64 Baseline (ms) | Mixed-Precision (ms) | Speedup | Relative Residual Error |
 | :--- | ---: | ---: | ---: | :--- |
 | **8192** | 1002.11 | **169.85** | **5.90x** | $4.9 \times 10^{-15}$ |
 | **16000** | 2294.46 | **507.15** | **4.52x** | $7.0 \times 10^{-15}$ |
