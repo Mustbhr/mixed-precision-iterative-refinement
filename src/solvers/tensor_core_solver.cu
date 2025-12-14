@@ -368,6 +368,9 @@ int solve_tensor_core_ir(const double *A_host, const double *b_host,
       // Cast U_12 to FP16
       cast_fp32_to_fp16_strided(d_U12, n, d_U_panel_fp16, k_update, n_update);
 
+      // Force Tensor Core Usage (Re-applying fix)
+      cublasSetMathMode(blas_handle, CUBLAS_TENSOR_OP_MATH);
+
       // GEMM
       CUBLAS_CHECK(cublasGemmEx(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, m_update,
                                 n_update, k_update, &minus_one_f,

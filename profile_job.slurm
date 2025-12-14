@@ -50,7 +50,7 @@ ncu \
     --force-overwrite \
     --kernel-name-base=function \
     -k regex:gemm \
-    --launch-count 3 \
+    --launch-count 100 \
     $EXE --profile
 
 echo "------------------------------------------------"
