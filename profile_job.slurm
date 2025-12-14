@@ -3,8 +3,8 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --output=profile_job_%j.out
-#SBATCH --error=profile_job_%j.err
+#SBATCH --output=results/profile_job_%j.out
+#SBATCH --error=results/profile_job_%j.err
 #SBATCH --job-name=cs380_project_profile
 
 # 1. Load Environment
